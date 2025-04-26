@@ -1,13 +1,4 @@
-None selected 
 
-Skip to content
-Using Gmail with screen readers
-in:draft 
-Conversations
-5.63 GB of 15 GB used
-Terms · Privacy · Program Policies
-Last account activity: 1 hour ago
-Details
 import networkx as nx
 import nltk
 import pandas as pd
@@ -178,5 +169,3 @@ for node in range(800,900):
 centrality2=np.array(centrality)
 df3 = pd.DataFrame(centrality2)
 df3.to_excel(r'/content/MultiView-RumorDetection/new900.xlsx','Sheet1')
-create-graph.py
-Displaying create-graph.py.
