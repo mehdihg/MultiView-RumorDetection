@@ -286,24 +286,64 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 structuremodel.fit(
     subtreefeature[0:803], labels[0:803],
     validation_data=(subtreefeature[803:917], labels[803:917]),
-    batch_size=10, epochs=150,
+    batch_size=10, epochs=2,
     callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True)]
 )
-contexmodel = Sequential()
-contexmodel.add(Embedding(len(word_index) + 1, 50, input_length=MAX_SEQUENCE_LENGTH))
-contexmodel.add(Dropout(0.3)) 
-contexmodel.add(Conv1D(10, 5, activation='relu'))
-contexmodel.add(MaxPooling1D(5))
-contexmodel.add(Flatten())
-contexmodel.add(Dense(2, activation='softmax'))
-contexmodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-contexmodel.fit(
-    data[0:803], labels[0:803],
-    validation_data=(data[803:917], labels[803:917]),
-    batch_size=10, epochs=150,
-    callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_modeln8000.hdf5", monitor='val_accuracy', save_best_only=True)]
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Dense, Dropout, concatenate
+from tensorflow.keras.models import Model, Sequential
+from transformers import TFBertModel, BertTokenizer
+
+# --- 1. Prepare BERT tokenizer and inputs ---
+MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH  # reuse your existing max length
+bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+# Assume `tweets` is your numpy array of raw text tweets
+encoded = bert_tokenizer(
+    tweets.tolist(),
+    max_length=MAX_SEQUENCE_LENGTH,
+    padding='max_length',
+    truncation=True,
+    return_tensors='tf'
 )
+input_ids = encoded['input_ids']
+attention_mask = encoded['attention_mask']
+
+# --- 2. Build the BERT-based context model ---
+# Define inputs
+input_ids_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
+attention_mask_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
+
+# Load pretrained BERT
+bert_encoder = TFBertModel.from_pretrained('bert-base-uncased')
+
+# Get pooled [CLS] token output
+bert_outputs = bert_encoder(
+    input_ids_layer,
+    attention_mask=attention_mask_layer
+)
+pooled_output = bert_outputs.pooler_output  # shape: (batch_size, hidden_size)
+
+# Add dropout and classification head
+x = Dropout(0.3)(pooled_output)
+context_logits = Dense(2, activation='softmax', name='context_output')(x)
+contexmodel = Model(inputs=[input_ids_layer, attention_mask_layer], outputs=context_logits, name='bert_context_model')
+contexmodel.compile(optimizer=Adam(lr=2e-5), loss='binary_crossentropy', metrics=['accuracy'])
+
+# Train context model
+contexmodel.fit([
+    input_ids[:803], attention_mask[:803]
+], labels[:803],
+    validation_data=([
+        input_ids[803:917], attention_mask[803:917]
+    ], labels[803:917]),
+    batch_size=8, epochs=2,
+    callbacks=[ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5', monitor='val_accuracy', save_best_only=True)]
+)
+
 
 
 import pandas as pd
@@ -345,7 +385,7 @@ Netmodel.compile(optimizer=Adam(lr=0.002), loss='binary_crossentropy', metrics=[
 Netmodel.fit(
     X[0:803], y[0:803],
     validation_data=(X[803:917], y[803:917]),
-    batch_size=10, epochs=150,
+    batch_size=10, epochs=2,
     callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_modelsn84347.hdf5", monitor='val_accuracy', save_best_only=True)]
 )
 
@@ -365,16 +405,41 @@ Netmodel.fit(
 merged = concatenate([structuremodel.output, Netmodel.output, contexmodel.output])
 final_output = Dense(2, activation='softmax')(merged)
 
-model = Model(inputs=[structuremodel.input, Netmodel.input, contexmodel.input], outputs=final_output)
+model = Model(inputs=[structuremodel.input, Netmodel.input,contexmodel.input[0],  # input_ids
+        contexmodel.input[1]], outputs=final_output)
 model.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.002), metrics=['accuracy'])
 
+
 model.fit(
-    [subtreefeature[0:803], X[0:803], data[0:803]],
-    labels[0:803],
-    validation_data=([subtreefeature[803:917], X[803:917], data[803:917]], labels[803:917]),
-    batch_size=10, epochs=150,
-    callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_modelsn.hdf5", monitor='val_accuracy', save_best_only=True)]
+    [
+        subtreefeature[:803],
+        X[:803],
+        input_ids[:803],
+        attention_mask[:803]
+    ],
+    labels[:803],
+    validation_data=(
+        [subtreefeature[803:917], X[803:917], input_ids[803:917], attention_mask[803:917]],
+        labels[803:917]
+    ),
+    batch_size=8,
+    epochs=2,
+    callbacks=[
+        tf.keras.callbacks.ModelCheckpoint(
+            "MultiView-RumorDetection/best_modelsn.hdf5", monitor='val_accuracy', save_best_only=True
+        )
+    ]
 )
+
+
+
+# model.fit(
+#     [subtreefeature[0:803], X[0:803], data[0:803]],
+#     labels[0:803],
+#     validation_data=([subtreefeature[803:917], X[803:917], data[803:917]], labels[803:917]),
+#     batch_size=10, epochs=150,
+#     callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_modelsn.hdf5", monitor='val_accuracy', save_best_only=True)]
+# )
 #model.fit([subtreefeature[0:803]], labels[0:803],callbacks=[checkpoint], batch_size=10, epochs=100,validation_data=([subtreefeature[803:917]],labels[803:917]))#,shuffle=True
 
 print(countminute)
@@ -386,83 +451,63 @@ TN=0
 FR=0
 FN=0
 from keras.models import load_model
-model2 = load_model('MultiView-RumorDetection/best_modelsn.hdf5')
-model2.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
-pre_x = model2.predict([subtreefeature[917:], X[917:], data[917:]])
+merge_loaded = load_model('MultiView-RumorDetection/best_modelsn.hdf5', custom_objects={'TFBertModel': TFBertModel})
+loss, acc = merge_loaded.evaluate([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]], y_test, verbose=0)
+print(f"Merge Model Test loss: {loss:.4f}, accuracy: {acc:.4f}")
+pre_preds = np.argmax(merge_loaded.predict([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]]), axis=1)
+true_labels = np.argmax(y_test, axis=1)
+TR = np.sum((pre_preds == true_labels) & (pre_preds == 1))
+TN = np.sum((pre_preds == true_labels) & (pre_preds == 0))
+FR = np.sum((pre_preds != true_labels) & (pre_preds == 1))
+FN = np.sum((pre_preds != true_labels) & (pre_preds == 0))
+print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
 
-# ارزیابی مدل با ارسال سه ورودی به مدل
-score = model2.evaluate([subtreefeature[917:], X[917:], data[917:]], y_test, verbose=0)
-for i in range(0,len(y_test)):
-    lpre.append((np.argmax(pre_x[i], axis = 0)))
-    testarg.append(np.argmax(y_test[i], axis = 0))
-    
-#print(labels[803:807],testarg[0:3],"\n",lpre[0:3])
-#[1,0]non
-#[0,1]true
-for i in range(0,len(y_test)):
-    if(lpre[i]==testarg[i] and lpre[i]==1):
-        TR=TR+1
-    elif(lpre[i]==testarg[i] and lpre[i]==0):
-        TN=TN+1
-    elif(lpre[i]!=testarg[i] and lpre[i]==0):
-        FN=FN+1
-    elif(lpre[i]!=testarg[i] and lpre[i]==1):
-        FR=FR+1
-        
-preR=TR/(TR+FR)
-preN=TN/(TN+FN)
-reR=TR/(TR+FN)
-reN=TN/(TN+FR)
-FR1=2*((preR*reR)/(preR+reR))
-FN1=2*((preN*reN)/(preN+reN))
-print(model2.metrics_names[1], score[1]*100,'TR',TR,'TN',TN,'FR',FR,'FN',FN,'preR',preR,'preN',preN,'reR',reR,'reN',reN,'FR1',FR1,'FN1',FN1)
-
-
-from keras.models import load_model
-import numpy as np
-
-# --- 1. بارگذاری سه مدل جداگانه (بهترین چک‌پوینت‌های هر کدوم) ---
+# --- 5. Voting Ensemble of Individual Views ---
+# Load best checkpoints of three separate views
 structure_best = load_model('MultiView-RumorDetection/best_models7913.hdf5')
-contex_best    = load_model('MultiView-RumorDetection/best_modeln8000.hdf5')
+contex_best    = load_model(
+    'MultiView-RumorDetection/best_modeln8000.hdf5',
+    custom_objects={'TFBertModel': TFBertModel}
+)
 net_best       = load_model('MultiView-RumorDetection/best_modelsn84347.hdf5')
 
-# --- 2. پیش‌بینی هر مدل روی داده‌های تست ---
-# توجه: همان اندیس 917: که برای test set استفاده کردید
+# Predictions on test set
 pred_s = np.argmax(structure_best.predict(subtreefeature[917:]), axis=1)
-pred_c = np.argmax(contex_best   .predict(data[917:]),           axis=1)
+pred_c = np.argmax(contex_best.predict([input_ids[917:], attention_mask[917:]]), axis=1)
 pred_n = np.argmax(net_best      .predict(X[917:]),              axis=1)
 
-# --- 3. رأی‌گیری اکثریت ---
+# Majority voting
 vote_preds = []
 for i in range(len(pred_s)):
     votes = [pred_s[i], pred_c[i], pred_n[i]]
     vote_preds.append(max(set(votes), key=votes.count))
 
-# --- 4. ارزیابی نتایج رأی‌گیری ---
+# Compute voting metrics
 TR = TN = FR = FN = 0
-for i in range(len(testarg)):
-    if vote_preds[i] == testarg[i]:
-        if vote_preds[i] == 1:  TR += 1  # True Rumor
-        else:                   TN += 1  # True Non-rumor
+for i, true in enumerate(true_labels):
+    pred = vote_preds[i]
+    if pred == true:
+        if pred == 1: TR += 1
+        else:         TN += 1
     else:
-        if vote_preds[i] == 1:  FR += 1  # False Rumor (predict rumor ولی واقعی non-rumor)
-        else:                   FN += 1  # False Non-rumor
+        if pred == 1: FR += 1
+        else:         FN += 1
 
-preR = TR / (TR + FR)    # Precision برای کلاس rumor
-preN = TN / (TN + FN)    # Precision برای کلاس non-rumor
-reR  = TR / (TR + FN)    # Recall برای کلاس rumor
-reN  = TN / (TN + FR)    # Recall برای کلاس non-rumor
-F1R  = 2 * (preR * reR) / (preR + reR) if (preR + reR) > 0 else 0
-F1N  = 2 * (preN * reN) / (preN + reN) if (preN + reN) > 0 else 0
-accuracy = (TR + TN) / len(testarg)
+accuracy_vote = (TR + TN) / len(true_labels)
+preR = TR / (TR + FR) if (TR + FR) > 0 else 0
+preN = TN / (TN + FN) if (TN + FN) > 0 else 0
+reR  = TR / (TR + FN) if (TR + FN) > 0 else 0
+reN  = TN / (TN + FR) if (TN + FR) > 0 else 0
+F1R  = 2 * preR * reR / (preR + reR) if (preR + reR) > 0 else 0
+F1N  = 2 * preN * reN / (preN + reN) if (preN + reN) > 0 else 0
 
-print(f'Voting Accuracy: {accuracy*100:.2f}%')
-print('TR', TR, 'TN', TN, 'FR', FR, 'FN', FN)
-print(f'Precision(rumor): {preR:.3f}, Recall(rumor): {reR:.3f},  F1(rumor): {F1R:.3f}')
-print(f'Precision(non-rumor): {preN:.3f}, Recall(non-rumor): {reN:.3f},  F1(non-rumor): {F1N:.3f}')
+print(f"Voting Accuracy: {accuracy_vote*100:.2f}%")
+print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
+print(f"Precision(rumor): {preR:.3f}, Recall(rumor): {reR:.3f}, F1(rumor): {F1R:.3f}")
+print(f"Precision(non-rumor): {preN:.3f}, Recall(non-rumor): {reN:.3f}, F1(non-rumor): {F1N:.3f}")
 
+# Save feature arrays for reproducibility
 np.save("subtreefeature.npy", subtreefeature)
 np.save("data.npy",           data)
 np.save("X.npy",              X)
 np.save("y_test.npy",         y_test)
-
