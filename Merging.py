@@ -31,9 +31,9 @@ from sklearn.preprocessing import LabelEncoder,MinMaxScaler,StandardScaler
 from keras.preprocessing.text import Tokenizer
 from keras_preprocessing.sequence import pad_sequences 
 from keras.regularizers import l2
-from keras.callbacks import ModelCheckpoint
+from keras.callbacks import ModelCheckpoint,EarlyStopping
 from matplotlib import pyplot
-
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 #import matplotlib.pyplot as plt
 num1=0
 num2=0
@@ -278,6 +278,21 @@ labels = keras.utils.to_categorical(np.asarray(labels))
 MAX_SEQUENCE_LENGTH=max([len(s.split()) for s in tweets])
 data = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH,padding='post')
 opt=Adam(lr=0.002)
+# structuremodel = Sequential()
+# structuremodel.add(Bidirectional(GRU(6, kernel_initializer='normal', input_shape=(int(countminute), 12), activation='tanh', dropout=0.2)))
+# structuremodel.add(Dense(2, activation='softmax'))
+# structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# structuremodel.fit(
+#     subtreefeature[0:803], labels[0:803],
+#     validation_data=(subtreefeature[803:917], labels[803:917]),
+#     batch_size=10, epochs=150,
+#     callbacks=[
+#         EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
+#         ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True)
+#     ]
+# )
+early_stopping_net = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
 structuremodel = Sequential()
 structuremodel.add(GRU(6, kernel_initializer='normal', input_shape=(int(countminute), 12), activation='tanh', dropout=0.2))
 structuremodel.add(Dense(2, activation='softmax'))
@@ -286,22 +301,39 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 structuremodel.fit(
     subtreefeature[0:803], labels[0:803],
     validation_data=(subtreefeature[803:917], labels[803:917]),
-    batch_size=10, epochs=2,
-    callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True)]
+    batch_size=10, epochs=3,
+    callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True),
+    early_stopping_net
+    ]
 )
+
+
+
 
 
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Input, Dense, Dropout, concatenate
 from tensorflow.keras.models import Model, Sequential
+
+
+
+
+from transformers import TFBertModel, BertTokenizer, create_optimizer
+
+
+
+
+
+
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Conv1D, GlobalMaxPooling1D, Dropout, Dense, concatenate
+from tensorflow.keras.models import Model
 from transformers import TFBertModel, BertTokenizer
 
-# --- 1. Prepare BERT tokenizer and inputs ---
-MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH  # reuse your existing max length
+# --- 1. توکنایزر و آماده‌سازی داده‌ها ---
+MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH  # همون قبلی
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
-# Assume `tweets` is your numpy array of raw text tweets
 encoded = bert_tokenizer(
     tweets.tolist(),
     max_length=MAX_SEQUENCE_LENGTH,
@@ -312,37 +344,152 @@ encoded = bert_tokenizer(
 input_ids = encoded['input_ids']
 attention_mask = encoded['attention_mask']
 
-# --- 2. Build the BERT-based context model ---
-# Define inputs
-input_ids_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
-attention_mask_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
+# --- 2. ساخت مدل BERT→CNN ---
+ids_in  = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
+mask_in = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
 
-# Load pretrained BERT
+# بارگذاری BERT پیش‌آموزش‌دیده
 bert_encoder = TFBertModel.from_pretrained('bert-base-uncased')
+bert_out = bert_encoder(ids_in, attention_mask=mask_in)
+sequence_output = bert_out.last_hidden_state  # (batch, seq_len, hidden_size)
 
-# Get pooled [CLS] token output
-bert_outputs = bert_encoder(
-    input_ids_layer,
-    attention_mask=attention_mask_layer
+# دو شاخه‌ی CNN با کرنل‌های مختلف
+conv3 = Conv1D(128, 3, activation='relu', padding='same')(sequence_output)
+conv5 = Conv1D(128, 5, activation='relu', padding='same')(sequence_output)
+
+# Max pooling محلی
+pool3 = GlobalMaxPooling1D()(conv3)
+pool5 = GlobalMaxPooling1D()(conv5)
+
+# ترکیب شاخه‌ها
+x = concatenate([pool3, pool5])
+x = Dropout(0.3)(x)
+x = Dense(64, activation='relu')(x)
+x = Dropout(0.3)(x)
+
+# خروجی نهایی
+outputs = Dense(2, activation='softmax', name='context_output')(x)
+
+# مدل کامل
+contexmodel = Model(inputs=[ids_in, mask_in], outputs=outputs, name='bert_cnn_context')
+
+# --- 3. کامپایل و آموزش ---
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+
+contexmodel.compile(
+    optimizer=Adam(learning_rate=2e-5),
+    loss='binary_crossentropy',
+    metrics=['accuracy']
 )
-pooled_output = bert_outputs.pooler_output  # shape: (batch_size, hidden_size)
 
-# Add dropout and classification head
-x = Dropout(0.3)(pooled_output)
-context_logits = Dense(2, activation='softmax', name='context_output')(x)
-contexmodel = Model(inputs=[input_ids_layer, attention_mask_layer], outputs=context_logits, name='bert_context_model')
-contexmodel.compile(optimizer=Adam(lr=2e-5), loss='binary_crossentropy', metrics=['accuracy'])
-
-# Train context model
-contexmodel.fit([
-    input_ids[:803], attention_mask[:803]
-], labels[:803],
-    validation_data=([
-        input_ids[803:917], attention_mask[803:917]
-    ], labels[803:917]),
-    batch_size=8, epochs=2,
-    callbacks=[ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5', monitor='val_accuracy', save_best_only=True)]
+contexmodel.fit(
+    [input_ids[:803], attention_mask[:803]],
+    labels[:803],
+    validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
+    batch_size=8,
+    epochs=30,
+    callbacks=[
+        EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True),
+        ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5',
+                        monitor='val_accuracy', save_best_only=True)
+    ]
 )
+
+
+
+
+
+
+
+
+
+
+
+
+# --- 1. Prepare BERT tokenizer and inputs ---
+# MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH  # reuse your existing max length
+# bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+# # Assume `tweets` is your numpy array of raw text tweets
+# encoded = bert_tokenizer(
+#     tweets.tolist(),
+#     max_length=MAX_SEQUENCE_LENGTH,
+#     padding='max_length',
+#     truncation=True,
+#     return_tensors='tf'
+# )
+# input_ids = encoded['input_ids']
+# attention_mask = encoded['attention_mask']
+
+# # --- 2. Build the BERT-based context model ---
+
+# # Define inputs
+# input_ids_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
+# attention_mask_layer = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
+
+# # Load pretrained BERT
+# bert_encoder = TFBertModel.from_pretrained('bert-base-uncased')
+
+# # Get pooled [CLS] token output
+# bert_outputs = bert_encoder(
+#     input_ids_layer,
+#     attention_mask=attention_mask_layer
+# )
+# pooled_output = bert_outputs.pooler_output  # shape: (batch_size, hidden_size)
+
+# # Add dropout and dense layers
+# x = Dropout(0.3)(pooled_output)
+# x = Dense(256, activation='relu')(x)       # 🔥 لایه‌ی Dense اضافه شد
+# x = Dropout(0.3)(x)                         # 🔥 یک Dropout دیگه
+# context_logits = Dense(2, activation='softmax', name='context_output')(x)
+
+# # Create model
+# contexmodel = Model(
+#     inputs=[input_ids_layer, attention_mask_layer],
+#     outputs=context_logits,
+#     name='bert_context_model'
+# )
+
+# # --- 3. Create optimizer with weight decay and warmup ---
+
+# # Calculate training steps
+# batch_size = 8
+# epochs = 25
+# steps_per_epoch = len(input_ids[:803]) // batch_size
+# num_train_steps = steps_per_epoch * epochs
+# num_warmup_steps = int(0.1 * num_train_steps)  # 10% warmup
+
+# # Create AdamW optimizer with learning rate schedule
+# optimizer, schedule = create_optimizer(
+#     init_lr=2e-5,
+#     num_train_steps=num_train_steps,
+#     num_warmup_steps=num_warmup_steps,
+#     weight_decay_rate=0.01
+# )
+
+# # Compile the model
+# contexmodel.compile(
+#     optimizer=optimizer,
+#     loss='binary_crossentropy',
+#     metrics=['accuracy']
+# )
+
+# # --- 4. Train the model ---
+
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+# contexmodel.fit(
+#     [input_ids[:803], attention_mask[:803]],
+#     labels[:803],
+#     validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
+#     batch_size=batch_size,
+#     epochs=epochs,
+#     callbacks=[
+#         EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True),
+#         ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5', monitor='val_accuracy', save_best_only=True)
+#     ]
+# )
 
 
 
@@ -382,13 +529,21 @@ Netmodel.add(Dense(4, kernel_initializer='uniform', activation='relu'))
 Netmodel.add(Dense(2, activation='softmax'))
 Netmodel.compile(optimizer=Adam(lr=0.002), loss='binary_crossentropy', metrics=['accuracy'])
 
+early_stopping_net = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+
 Netmodel.fit(
     X[0:803], y[0:803],
     validation_data=(X[803:917], y[803:917]),
-    batch_size=10, epochs=2,
-    callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_modelsn84347.hdf5", monitor='val_accuracy', save_best_only=True)]
+    batch_size=10, epochs=3,
+    callbacks=[
+        ModelCheckpoint("MultiView-RumorDetection/best_modelsn84347.hdf5", monitor='val_accuracy', save_best_only=True),
+        early_stopping_net
+    ]
 )
-
+np.save("subtreefeature.npy", subtreefeature)
+np.save("data.npy",           data)
+np.save("X.npy",              X)
+np.save("y_test.npy",         y_test)
 
 #opt=SGD(lr=0.05)
 
@@ -405,31 +560,34 @@ Netmodel.fit(
 merged = concatenate([structuremodel.output, Netmodel.output, contexmodel.output])
 final_output = Dense(2, activation='softmax')(merged)
 
-model = Model(inputs=[structuremodel.input, Netmodel.input,contexmodel.input[0],  # input_ids
-        contexmodel.input[1]], outputs=final_output)
-model.compile(loss='binary_crossentropy', optimizer=Adam(lr=0.002), metrics=['accuracy'])
+# model = Model(inputs=[structuremodel.input, Netmodel.input,contexmodel.input[0],  # input_ids
+#         contexmodel.input[1]], outputs=final_output)
+# model.compile(loss='categorical_crossentropy', optimizer=Adam(lr=0.002), metrics=['accuracy'])
 
 
-model.fit(
-    [
-        subtreefeature[:803],
-        X[:803],
-        input_ids[:803],
-        attention_mask[:803]
-    ],
-    labels[:803],
-    validation_data=(
-        [subtreefeature[803:917], X[803:917], input_ids[803:917], attention_mask[803:917]],
-        labels[803:917]
-    ),
-    batch_size=8,
-    epochs=2,
-    callbacks=[
-        tf.keras.callbacks.ModelCheckpoint(
-            "MultiView-RumorDetection/best_modelsn.hdf5", monitor='val_accuracy', save_best_only=True
-        )
-    ]
-)
+# early_stopping = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+
+# model.fit(
+#     [
+#         subtreefeature[:803],
+#         X[:803],
+#         input_ids[:803],
+#         attention_mask[:803]
+#     ],
+#     labels[:803],
+#     validation_data=(
+#         [subtreefeature[803:917], X[803:917], input_ids[803:917], attention_mask[803:917]],
+#         labels[803:917]
+#     ),
+#     batch_size=8,
+#     epochs=50,  # تعداد ایپاک‌ها را به 20 تغییر دهید
+#     callbacks=[
+#         tf.keras.callbacks.ModelCheckpoint(
+#             "MultiView-RumorDetection/best_modelsn.hdf5", monitor='val_accuracy', save_best_only=True
+#         ),
+#         early_stopping  # اضافه کردن EarlyStopping
+#     ]
+# )
 
 
 
@@ -444,26 +602,11 @@ model.fit(
 
 print(countminute)
 
-lpre=[]
-testarg=[]
-TR=0
-TN=0
-FR=0
-FN=0
 from keras.models import load_model
-merge_loaded = load_model('MultiView-RumorDetection/best_modelsn.hdf5', custom_objects={'TFBertModel': TFBertModel})
-loss, acc = merge_loaded.evaluate([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]], y_test, verbose=0)
-print(f"Merge Model Test loss: {loss:.4f}, accuracy: {acc:.4f}")
-pre_preds = np.argmax(merge_loaded.predict([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]]), axis=1)
-true_labels = np.argmax(y_test, axis=1)
-TR = np.sum((pre_preds == true_labels) & (pre_preds == 1))
-TN = np.sum((pre_preds == true_labels) & (pre_preds == 0))
-FR = np.sum((pre_preds != true_labels) & (pre_preds == 1))
-FN = np.sum((pre_preds != true_labels) & (pre_preds == 0))
-print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 
-# --- 5. Voting Ensemble of Individual Views ---
-# Load best checkpoints of three separate views
+# --- 1. بارگذاری مدل‌ها ---
 structure_best = load_model('MultiView-RumorDetection/best_models7913.hdf5')
 contex_best    = load_model(
     'MultiView-RumorDetection/best_modeln8000.hdf5',
@@ -471,43 +614,204 @@ contex_best    = load_model(
 )
 net_best       = load_model('MultiView-RumorDetection/best_modelsn84347.hdf5')
 
-# Predictions on test set
-pred_s = np.argmax(structure_best.predict(subtreefeature[917:]), axis=1)
-pred_c = np.argmax(contex_best.predict([input_ids[917:], attention_mask[917:]]), axis=1)
-pred_n = np.argmax(net_best      .predict(X[917:]),              axis=1)
+# --- 2. آماده‌سازی داده‌های آزمون ---
+subtreefeature = np.load("subtreefeature.npy")
+data            = np.load("data.npy")
+X               = np.load("X.npy")
+y_test          = np.load("y_test.npy")
 
+X_struct = subtreefeature[917:]  # داده‌های ویژگی مربوط به ساختار
+X_text   = data[917:]           # داده‌های ویژگی مربوط به متن
+X_net    = X[917:]              # داده‌های ویژگی مربوط به شبکه
+y_true   = np.argmax(y_test, axis=1)  # تبدیل one-hot به لیبل عددی
+
+# --- 3. پیش‌بینی هر مدل ---
+pred_s = np.argmax(structure_best.predict(X_struct), axis=1)
+pred_c = np.argmax(contex_best.predict([input_ids[917:], attention_mask[917:]]), axis=1)
+pred_n = np.argmax(net_best.predict(X_net), axis=1)
+
+# --- 4. تابع کمکی برای چاپ گزارش ---
+def report(name, y_true, y_pred):
+    print(f"===== {name} =====")
+    print("Accuracy :", accuracy_score(y_true, y_pred))
+    print("Precision:", precision_score(y_true, y_pred, average='binary'))
+    print("Recall   :", recall_score(y_true, y_pred, average='binary'))
+    print("F1-Score :", f1_score(y_true, y_pred, average='binary'))
+    print("\nClassification Report:\n", classification_report(y_true, y_pred, digits=4))
+    print("\n")
+
+# --- 5. چاپ گزارش برای هر مدل ---
+report("Structure-Model (GRU)", y_true, pred_s)
+report("Context-Model (BERT)", y_true, pred_c)
+report("Centrality-Model (LSTM)", y_true, pred_n)
+
+# --- 6. ترکیب پیش‌بینی‌ها با روش Voting ---
 # Majority voting
 vote_preds = []
 for i in range(len(pred_s)):
     votes = [pred_s[i], pred_c[i], pred_n[i]]
     vote_preds.append(max(set(votes), key=votes.count))
 
-# Compute voting metrics
-TR = TN = FR = FN = 0
-for i, true in enumerate(true_labels):
-    pred = vote_preds[i]
-    if pred == true:
-        if pred == 1: TR += 1
-        else:         TN += 1
-    else:
-        if pred == 1: FR += 1
-        else:         FN += 1
+# --- 7. گزارش ترکیب Voting ---
+report("Multi-View Ensemble Voting", y_true, vote_preds)
 
-accuracy_vote = (TR + TN) / len(true_labels)
-preR = TR / (TR + FR) if (TR + FR) > 0 else 0
-preN = TN / (TN + FN) if (TN + FN) > 0 else 0
-reR  = TR / (TR + FN) if (TR + FN) > 0 else 0
-reN  = TN / (TN + FR) if (TN + FR) > 0 else 0
-F1R  = 2 * preR * reR / (preR + reR) if (preR + reR) > 0 else 0
-F1N  = 2 * preN * reN / (preN + reN) if (preN + reN) > 0 else 0
+# --- 8. ذخیره‌سازی پیش‌بینی‌ها برای ارزیابی‌های بیشتر ---
+np.save("predictions_s.npy", pred_s)
+np.save("predictions_c.npy", pred_c)
+np.save("predictions_n.npy", pred_n)
+np.save("vote_predictions.npy", vote_preds)
 
-print(f"Voting Accuracy: {accuracy_vote*100:.2f}%")
-print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
-print(f"Precision(rumor): {preR:.3f}, Recall(rumor): {reR:.3f}, F1(rumor): {F1R:.3f}")
-print(f"Precision(non-rumor): {preN:.3f}, Recall(non-rumor): {reN:.3f}, F1(non-rumor): {F1N:.3f}")
 
-# Save feature arrays for reproducibility
-np.save("subtreefeature.npy", subtreefeature)
-np.save("data.npy",           data)
-np.save("X.npy",              X)
-np.save("y_test.npy",         y_test)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# lpre=[]
+# testarg=[]
+# TR=0
+# TN=0
+# FR=0
+# FN=0
+# from keras.models import load_model
+# merge_loaded = load_model('MultiView-RumorDetection/best_modelsn.hdf5', custom_objects={'TFBertModel': TFBertModel})
+# loss, acc = merge_loaded.evaluate([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]], y_test, verbose=0)
+# print(f"Merge Model Test loss: {loss:.4f}, accuracy: {acc:.4f}")
+# pre_preds = np.argmax(merge_loaded.predict([subtreefeature[917:], X[917:], input_ids[917:], attention_mask[917:]]), axis=1)
+# true_labels = np.argmax(y_test, axis=1)
+# TR = np.sum((pre_preds == true_labels) & (pre_preds == 1))
+# TN = np.sum((pre_preds == true_labels) & (pre_preds == 0))
+# FR = np.sum((pre_preds != true_labels) & (pre_preds == 1))
+# FN = np.sum((pre_preds != true_labels) & (pre_preds == 0))
+# print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
+
+# # --- 5. Voting Ensemble of Individual Views ---
+# # Load best checkpoints of three separate views
+# structure_best = load_model('MultiView-RumorDetection/best_models7913.hdf5')
+# contex_best    = load_model(
+#     'MultiView-RumorDetection/best_modeln8000.hdf5',
+#     custom_objects={'TFBertModel': TFBertModel}
+# )
+# net_best       = load_model('MultiView-RumorDetection/best_modelsn84347.hdf5')
+
+# # Predictions on test set
+# pred_s = np.argmax(structure_best.predict(subtreefeature[917:]), axis=1)
+# pred_c = np.argmax(contex_best.predict([input_ids[917:], attention_mask[917:]]), axis=1)
+# pred_n = np.argmax(net_best      .predict(X[917:]),              axis=1)
+
+# # Majority voting
+# vote_preds = []
+# for i in range(len(pred_s)):
+#     votes = [pred_s[i], pred_c[i], pred_n[i]]
+#     vote_preds.append(max(set(votes), key=votes.count))
+
+# # Compute voting metrics
+# TR = TN = FR = FN = 0
+# for i, true in enumerate(true_labels):
+#     pred = vote_preds[i]
+#     if pred == true:
+#         if pred == 1: TR += 1
+#         else:         TN += 1
+#     else:
+#         if pred == 1: FR += 1
+#         else:         FN += 1
+
+# accuracy_vote = (TR + TN) / len(true_labels)
+# preR = TR / (TR + FR) if (TR + FR) > 0 else 0
+# preN = TN / (TN + FN) if (TN + FN) > 0 else 0
+# reR  = TR / (TR + FN) if (TR + FN) > 0 else 0
+# reN  = TN / (TN + FR) if (TN + FR) > 0 else 0
+# F1R  = 2 * preR * reR / (preR + reR) if (preR + reR) > 0 else 0
+# F1N  = 2 * preN * reN / (preN + reN) if (preN + reN) > 0 else 0
+
+# print(f"Voting Accuracy: {accuracy_vote*100:.2f}%")
+# print(f"TP: {TR}, TN: {TN}, FP: {FR}, FN: {FN}")
+# print(f"Precision(rumor): {preR:.3f}, Recall(rumor): {reR:.3f}, F1(rumor): {F1R:.3f}")
+# print(f"Precision(non-rumor): {preN:.3f}, Recall(non-rumor): {reN:.3f}, F1(non-rumor): {F1N:.3f}")
+
+# # Save feature arrays for reproducibility
+# np.save("subtreefeature.npy", subtreefeature)
+# np.save("data.npy",           data)
+# np.save("X.npy",              X)
+# np.save("y_test.npy",         y_test)
+
+
+
+
+
+
+# from keras.models import load_model
+
+# import numpy as np
+
+# # --- 1. بارگذاری مدل‌ها ---
+# structure_best = load_model('MultiView-RumorDetection/best_models7913.hdf5')
+# contex_best    = load_model(
+#     'MultiView-RumorDetection/best_modeln8000.hdf5',
+#     custom_objects={'TFBertModel': TFBertModel}
+# )
+# net_best       = load_model('MultiView-RumorDetection/best_modelsn84347.hdf5')
+
+# # --- 2. آماده‌سازی داده‌های آزمون ---
+# # subtreefeature[917:], data[917:], X[917:] و y_test از کد شما
+
+# subtreefeature = np.load("subtreefeature.npy")
+# data            = np.load("data.npy")
+# X               = np.load("X.npy")
+# y_test          = np.load("y_test.npy")
+
+# # حالا ببرید مثل قبل:
+# X_struct = subtreefeature[917:]
+# X_text   = data[917:]
+# X_net    = X[917:]
+# y_true   = np.argmax(y_test, axis=1)
+
+
+
+# X_struct = subtreefeature[917:]
+# X_text   = data[917:]
+# X_net    = X[917:]        # بعد از reshape: (num_samples, 1, feature_dim)
+# y_true   = np.argmax(y_test, axis=1)  # تبدیل one-hot به لیبل عددی
+
+# # --- 3. پیش‌بینی هر مدل ---
+# pred_s = np.argmax(structure_best.predict(X_struct), axis=1)
+# pred_c = np.argmax(contex_best.predict([input_ids[917:], attention_mask[917:]]), axis=1)
+# pred_n = np.argmax(net_best      .predict(X_net  ), axis=1)
+
+# # --- 4. تابع کمکی برای چاپ گزارش ---
+# def report(name, y_true, y_pred):
+#     print(f"===== {name} =====")
+#     print("Accuracy :", accuracy_score(y_true, y_pred))
+#     print("Precision:", precision_score(y_true, y_pred, average='binary'))
+#     print("Recall   :", recall_score   (y_true, y_pred, average='binary'))
+#     print("F1-Score :", f1_score       (y_true, y_pred, average='binary'))
+#     print("\nClassification Report:\n", classification_report(y_true, y_pred, digits=4))
+#     print("\n")
+
+# # --- 5. چاپ گزارش برای هر مدل ---
+# report("Structure-Model (GRU)", y_true, pred_s)
+# report("Context-Model (BERT)",   y_true, pred_c)
+# report("Centrality-Model (LSTM)", y_true, pred_n)
+
+# # (اختیاری) اگر مدل ترکیبی را هم دارید:
+# ensemble_best = load_model('MultiView-RumorDetection/best_modelsn.hdf5', custom_objects={'TFBertModel': TFBertModel})
+# pred_e = np.argmax(
+#     ensemble_best.predict([X_struct, X_net, input_ids[917:], attention_mask[917:]]),
+#     axis=1
+# )
+# report("Multi-View Ensemble Concat", y_true, pred_e)
+
+
+
+
