@@ -292,7 +292,7 @@ opt=Adam(lr=0.002)
 #         ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True)
 #     ]
 # )
-early_stopping_net = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+early_stopping_net = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
 structuremodel = Sequential()
 structuremodel.add(GRU(6, kernel_initializer='normal', input_shape=(int(countminute), 12), activation='tanh', dropout=0.2))
 structuremodel.add(Dense(2, activation='softmax'))
@@ -301,7 +301,7 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 structuremodel.fit(
     subtreefeature[0:803], labels[0:803],
     validation_data=(subtreefeature[803:917], labels[803:917]),
-    batch_size=10, epochs=3,
+    batch_size=10, epochs=150,
     callbacks=[ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True),
     early_stopping_net
     ]
@@ -388,9 +388,9 @@ contexmodel.fit(
     labels[:803],
     validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
     batch_size=8,
-    epochs=30,
+    epochs=50,
     callbacks=[
-        EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True),
+        EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
         ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5',
                         monitor='val_accuracy', save_best_only=True)
     ]
@@ -490,56 +490,139 @@ contexmodel.fit(
 #         ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5', monitor='val_accuracy', save_best_only=True)
 #     ]
 # )
-
-
+import pandas as pd
+import numpy as np
+from keras.models import Sequential
+from keras.layers import Conv1D, MaxPooling1D, LSTM, Dropout, Dense
+from keras.optimizers import Adam
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+from sklearn.preprocessing import LabelEncoder
+from sklearn import preprocessing
+import random
 
 import pandas as pd
 import numpy as np
-from tensorflow import keras
-from keras.models import Sequential
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, LSTM, Conv1D, MaxPooling1D, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn import preprocessing
-from keras.layers import Dense
-import random
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.utils import to_categorical
+
 # load the dataset
-#df = pd.read_excel(r"F:\\centralityf25.xlsx")
-df = pd.read_excel(r"/content/MultiView-RumorDetection/centstructtime.xlsx")
-# split into input (X) and output (y) variables
-idd=df.values[:,1]
-X = df.values[:,3:]
+df = pd.read_excel("/content/MultiView-RumorDetection/centstructtime.xlsx")
+
+# Features and labels
+idd = df.values[:, 1]
+X = df.values[:, 3:]
 X = np.asarray(X).astype('float32')
-min_max_scaler = preprocessing.MinMaxScaler(feature_range=(1,8))
-minmax = min_max_scaler.fit_transform(X)
-X=minmax
-yy= df.values[:,2]
-print(yy[0:5])
-le = LabelEncoder() 
-le.fit(yy) 
+
+# Scale inputs
+min_max_scaler = preprocessing.MinMaxScaler(feature_range=(1, 8))
+X = min_max_scaler.fit_transform(X)
+
+# Labels
+yy = df.values[:, 2]
+le = LabelEncoder()
+le.fit(yy)
 y = le.transform(yy)
-y = keras.utils.to_categorical(np.asarray(y)) 
-print(y[0:5])
-b=0
-a=0    
-X_test=X[917:]
-y_test=y[917:]
-# define the keras model
+y = to_categorical(np.asarray(y))
+
+# Reshape inputs for Conv1D
+X = np.expand_dims(X, axis=2)  # (samples, timesteps, features)
+
+# Split data
+X_train, X_val, X_test = X[0:803], X[803:917], X[917:]
+y_train, y_val, y_test = y[0:803], y[803:917], y[917:]
+
+# Model architecture
 Netmodel = Sequential()
-X = np.reshape(X, (X.shape[0], 1, X.shape[1]))
-Netmodel.add(LSTM(8, input_shape=(1, 8), kernel_initializer='uniform', activation='relu'))
-Netmodel.add(Dense(4, kernel_initializer='uniform', activation='relu'))
+Netmodel.add(Conv1D(filters=128, kernel_size=3, activation='relu', padding='same', input_shape=(X.shape[1], 1)))
+Netmodel.add(BatchNormalization())
+Netmodel.add(MaxPooling1D(pool_size=2))
+
+Netmodel.add(Conv1D(filters=64, kernel_size=3, activation='relu', padding='same'))
+Netmodel.add(BatchNormalization())
+
+Netmodel.add(LSTM(64, return_sequences=False))
+Netmodel.add(Dropout(0.5))
+
+Netmodel.add(Dense(64, activation='relu'))
+Netmodel.add(Dropout(0.3))
 Netmodel.add(Dense(2, activation='softmax'))
-Netmodel.compile(optimizer=Adam(lr=0.002), loss='binary_crossentropy', metrics=['accuracy'])
 
-early_stopping_net = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+# Compile model
+optimizer = Adam(learning_rate=0.0001)
+Netmodel.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
 
+# Callbacks
+early_stopping = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
+checkpoint = ModelCheckpoint("MultiView-RumorDetection/best_model_v2.hdf5", monitor='val_accuracy', save_best_only=True)
+
+# Train
 Netmodel.fit(
-    X[0:803], y[0:803],
-    validation_data=(X[803:917], y[803:917]),
-    batch_size=10, epochs=3,
-    callbacks=[
-        ModelCheckpoint("MultiView-RumorDetection/best_modelsn84347.hdf5", monitor='val_accuracy', save_best_only=True),
-        early_stopping_net
-    ]
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    batch_size=10,
+    epochs=150,
+    callbacks=[early_stopping, checkpoint]
 )
+
+# Evaluate on test set
+test_loss, test_accuracy = Netmodel.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_accuracy:.4f}")
+
+
+
+
+# import pandas as pd
+# import numpy as np
+# from tensorflow import keras
+# from keras.models import Sequential
+# from sklearn import preprocessing
+# from keras.layers import Dense
+# import random
+# # load the dataset
+# #df = pd.read_excel(r"F:\\centralityf25.xlsx")
+# df = pd.read_excel(r"/content/MultiView-RumorDetection/centstructtime.xlsx")
+# # split into input (X) and output (y) variables
+# idd=df.values[:,1]
+# X = df.values[:,3:]
+# X = np.asarray(X).astype('float32')
+# min_max_scaler = preprocessing.MinMaxScaler(feature_range=(1,8))
+# minmax = min_max_scaler.fit_transform(X)
+# X=minmax
+# yy= df.values[:,2]
+# print(yy[0:5])
+# le = LabelEncoder() 
+# le.fit(yy) 
+# y = le.transform(yy)
+# y = keras.utils.to_categorical(np.asarray(y)) 
+# print(y[0:5])
+# b=0
+# a=0    
+# X_test=X[917:]
+# y_test=y[917:]
+# # define the keras model
+# Netmodel = Sequential()
+# X = np.reshape(X, (X.shape[0], 1, X.shape[1]))
+# Netmodel.add(LSTM(8, input_shape=(1, 8), kernel_initializer='uniform', activation='relu'))
+# Netmodel.add(Dense(4, kernel_initializer='uniform', activation='relu'))
+# Netmodel.add(Dense(2, activation='softmax'))
+# Netmodel.compile(optimizer=Adam(lr=0.002), loss='binary_crossentropy', metrics=['accuracy'])
+
+# early_stopping_net = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
+
+# Netmodel.fit(
+#     X[0:803], y[0:803],
+#     validation_data=(X[803:917], y[803:917]),
+#     batch_size=10, epochs=3,
+#     callbacks=[
+#         ModelCheckpoint("MultiView-RumorDetection/best_modelsn84347.hdf5", monitor='val_accuracy', save_best_only=True),
+#         early_stopping_net
+#     ]
+# )
 np.save("subtreefeature.npy", subtreefeature)
 np.save("data.npy",           data)
 np.save("X.npy",              X)
@@ -556,9 +639,96 @@ np.save("y_test.npy",         y_test)
 #validation_data=([subtreefeature[170:],data[170:]], labels[170:])
 
 
+from keras.models import Model, load_model
+from keras.layers import Dense, concatenate
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+import numpy as np
+from transformers import TFBertModel
 
-merged = concatenate([structuremodel.output, Netmodel.output, contexmodel.output])
+# --- 1. merge outputs ---
+merged = concatenate([
+    structuremodel.output,
+    Netmodel.output,
+    contexmodel.output
+])
+
 final_output = Dense(2, activation='softmax')(merged)
+
+# --- 2. build final model with *flat* list of inputs ---
+all_inputs = [structuremodel.input, Netmodel.input] + contexmodel.input
+final_model = Model(inputs=all_inputs, outputs=final_output)
+
+# --- 3. compile ---
+final_model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# --- 4. callbacks ---
+early_stop_concat = EarlyStopping(
+    monitor='val_loss',
+    patience=30,
+    restore_best_weights=True
+)
+checkpoint_concat = ModelCheckpoint(
+    "MultiView-RumorDetection/best_modelsn.hdf5",
+    monitor='val_accuracy',
+    save_best_only=True
+)
+
+# --- 5. train (fit) ---
+final_model.fit(
+    # ورودی‌ها: [X_struct, X_net, input_ids, attention_mask]
+    [
+        subtreefeature[0:803],     # X_struct_train
+        X[0:803],                  # X_net_train
+        input_ids[0:803],          # BERT input_ids train
+        attention_mask[0:803]      # BERT attention_mask train
+    ],
+    labels[0:803],
+    validation_data=(
+      [
+        subtreefeature[803:917],
+        X[803:917],
+        input_ids[803:917],
+        attention_mask[803:917]
+      ],
+      labels[803:917]
+    ),
+    batch_size=10,
+    epochs=150,
+    callbacks=[early_stop_concat, checkpoint_concat]
+)
+
+# --- 6. save final model ---
+final_model.save("MultiView-RumorDetection/best_modelsn.hdf5")
+
+# --- 7. load & predict on test set ---
+concat_best = load_model(
+    "MultiView-RumorDetection/best_modelsn.hdf5",
+    custom_objects={'TFBertModel': TFBertModel}
+)
+
+# prepare test inputs
+X_struct_test = subtreefeature[917:]
+X_net_test    = X[917:]
+ids_test      = input_ids[917:]
+mask_test     = attention_mask[917:]
+
+y_pred_concat = np.argmax(
+    concat_best.predict([X_struct_test, X_net_test, ids_test, mask_test]),
+    axis=1
+)
+
+# گزارش عملکرد
+report("Final Concatenated Model", y_true, y_pred_concat)
+
+# ذخیره پیش‌بینی‌ها
+np.save("predictions_concat.npy", y_pred_concat)
+
+
+
 
 # model = Model(inputs=[structuremodel.input, Netmodel.input,contexmodel.input[0],  # input_ids
 #         contexmodel.input[1]], outputs=final_output)
@@ -811,7 +981,3 @@ np.save("vote_predictions.npy", vote_preds)
 #     axis=1
 # )
 # report("Multi-View Ensemble Concat", y_true, pred_e)
-
-
-
-
