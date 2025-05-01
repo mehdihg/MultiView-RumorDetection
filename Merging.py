@@ -610,122 +610,332 @@ plt.legend()
 plt.tight_layout()
 plt.show()
 
+
+
+
+
+
+
+
+
+
+
+
+import numpy as np
+import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+from tensorflow.keras.layers import (
+    Input, Dense, Dropout, Concatenate, Lambda, Add
+)
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve,
+    precision_recall_curve,
+    auc
+)
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
 
-# ---------------- 1. استخراج ویژگی‌های میانی از BERT و Net ----------------
-# پیدا کردن Dense(64) از contexmodel
+# ---------------- 0. آماده‌سازی مدل‌های پیش‌آموزش‌دیده ----------------
+# (در صورت نیاز لایه‌های آنها را فریز کنید)
+for layer in contexmodel.layers:
+    layer.trainable = False
+for layer in Netmodel.layers:
+    layer.trainable = False
+
+# ---------------- 1. یافتن و ساخت مدل‌های استخراج ویژگی ----------------
+# 1.1. پیدا کردن لایه Dense(64) در contexmodel
 intermediate_bert_layer = None
 for layer in reversed(contexmodel.layers):
     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
         intermediate_bert_layer = layer.name
         break
-assert intermediate_bert_layer is not None, "❌ لایه Dense با خروجی 64 در contexmodel پیدا نشد!"
+assert intermediate_bert_layer, "لایه Dense با خروجی 64 در contexmodel پیدا نشد!"
 
-bert_feature_model = Model(inputs=contexmodel.input, outputs=contexmodel.get_layer(intermediate_bert_layer).output)
+bert_feature_model = Model(
+    inputs=contexmodel.input,
+    outputs=contexmodel.get_layer(intermediate_bert_layer).output
+)
 
-# پیدا کردن Dense(64) از Netmodel
+# 1.2. پیدا کردن لایه Dense(64) در Netmodel
 intermediate_net_layer = None
 for layer in reversed(Netmodel.layers):
     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
         intermediate_net_layer = layer.name
         break
-assert intermediate_net_layer is not None, "❌ لایه Dense با خروجی 64 در Netmodel پیدا نشد!"
+assert intermediate_net_layer, "لایه Dense با خروجی 64 در Netmodel پیدا نشد!"
 
-net_feature_model = Model(inputs=Netmodel.input, outputs=Netmodel.get_layer(intermediate_net_layer).output)
+net_feature_model = Model(
+    inputs=Netmodel.input,
+    outputs=Netmodel.get_layer(intermediate_net_layer).output
+)
 
-# پیش‌بینی ویژگی‌ها
-X_bert = bert_feature_model.predict([input_ids, attention_mask])
-X_net = net_feature_model.predict(X)
+# ---------------- 2. تعریف ورودی‌های مدل نهایی ----------------
+# ورودی‌های BERT
+input_ids_in, attention_mask_in = contexmodel.input
+# ورودی Net
+net_input = Netmodel.input
 
-# ---------------- 2. ترکیب ویژگی‌ها ----------------
-X_combined = np.concatenate([X_bert, X_net], axis=1)
+# ---------------- 3. استخراج ویژگی‌ها ----------------
+bert_feat = bert_feature_model([input_ids_in, attention_mask_in])  # (None, 64)
+net_feat  = net_feature_model(net_input)                          # (None, 64)
+
+# ---------------- 4. Weighted Adaptive Fusion ----------------
+# 4.1. گیت ترکیب
+fusion_concat = Concatenate(name='fusion_concat')([bert_feat, net_feat])  # (None,128)
+gates = Dense(2, activation='softmax', name='fusion_gate')(fusion_concat) 
+# gates[:,0] برای BERT، gates[:,1] برای Net
+
+# 4.2. جداسازی و اعمال وزن‌ها
+w_bert = Lambda(lambda x: tf.expand_dims(x[:, 0], -1), name='w_bert')(gates)  # (None,1)
+w_net  = Lambda(lambda x: tf.expand_dims(x[:, 1], -1), name='w_net')(gates)   # (None,1)
+
+fused = Add(name='fused_features')([
+    tf.multiply(w_bert, bert_feat),
+    tf.multiply(w_net,  net_feat)
+])  # (None,64)
+
+# ---------------- 5. سر مدل (classification head) ----------------
+x = Dense(64, activation='relu', name='head_dense')(fused)
+x = Dropout(0.3, name='head_dropout')(x)
+output = Dense(2, activation='softmax', name='head_output')(x)
+
+# ---------------- 6. ساخت و کامپایل مدل نهایی ----------------
+final_model = Model(
+    inputs=[input_ids_in, attention_mask_in, net_input],
+    outputs=output,
+    name='WeightedAdaptiveFusionModel'
+)
+final_model.compile(
+    optimizer=Adam(learning_rate=1e-4),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+final_model.summary()
+
+# ---------------- 7. آماده‌سازی داده‌ها ----------------
+# فرض: input_ids, attention_mask، X و labels (one-hot) پیش‌تر بارگذاری شده‌اند.
+Xb = [input_ids, attention_mask]
+Xn = X
+y  = labels
 
 # تقسیم داده‌ها
-X_train = X_combined[0:803]
-X_val   = X_combined[803:917]
-X_test  = X_combined[917:]
+split1, split2 = 803, 917
+Xb_train = [arr[:split1] for arr in Xb]
+Xn_train = Xn[:split1]
+y_train  = y[:split1]
 
-y_train_combined = labels[0:803]
-y_val_combined   = labels[803:917]
-y_test_combined  = labels[917:]
+Xb_val   = [arr[split1:split2] for arr in Xb]
+Xn_val   = Xn[split1:split2]
+y_val    = y[split1:split2]
 
-# ---------------- 3. ساخت مدل نهایی ترکیبی ----------------
-final_input = Input(shape=(X_train.shape[1],))
-x = Dense(64, activation='relu')(final_input)
-x = Dropout(0.3)(x)
-final_output = Dense(2, activation='softmax')(x)
+Xb_test  = [arr[split2:] for arr in Xb]
+Xn_test  = Xn[split2:]
+y_test   = y[split2:]
 
-final_model = Model(inputs=final_input, outputs=final_output)
-final_model.compile(optimizer=Adam(learning_rate=1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+# ---------------- 8. آموزش مدل ----------------
+early_stop = EarlyStopping(
+    monitor='val_loss', patience=50, restore_best_weights=True
+)
+checkpoint = ModelCheckpoint(
+    "best_weighted_fusion_model.h5",
+    monitor="val_accuracy", save_best_only=True
+)
 
-# ---------------- 4. آموزش مدل نهایی با ذخیره بهترین نسخه ----------------
-early_stop = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
-checkpoint = ModelCheckpoint("MultiView-RumorDetection/best_combined_model.hdf5", monitor="val_accuracy", save_best_only=True)
-
-final_model.fit(
-    X_train, y_train_combined,
-    validation_data=(X_val, y_val_combined),
+history = final_model.fit(
+    x = Xb_train + [Xn_train],
+    y = y_train,
+    validation_data=(Xb_val + [Xn_val], y_val),
     batch_size=8,
     epochs=150,
     callbacks=[early_stop, checkpoint]
 )
 
-# ---------------- 5. ارزیابی مدل نهایی ----------------
-loss, acc = final_model.evaluate(X_test, y_test_combined)
-print(f"\n✅ Final Combined Model Accuracy: {acc:.4f}")
+# ---------------- 9. ارزیابی نهایی ----------------
+loss, acc = final_model.evaluate(Xb_test + [Xn_test], y_test, verbose=0)
+print(f"\n✅ Final Weighted Adaptive Fusion Accuracy: {acc:.4f}")
 
-y_true = y_test_combined.argmax(axis=1)
-y_pred_probs = final_model.predict(X_test)
-y_pred = y_pred_probs.argmax(axis=1)
+y_true       = np.argmax(y_test, axis=1)
+y_pred_probs = final_model.predict(Xb_test + [Xn_test])
+y_pred       = np.argmax(y_pred_probs, axis=1)
 
-# 📋 گزارش آماری
-print("📌 Classification Report - Combined:")
+print("\n📌 Classification Report:")
 print(classification_report(y_true, y_pred, digits=4))
 
-# 📊 Confusion Matrix
+# ماتریس درهم‌ریختگی
 cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(6, 4))
+plt.figure(figsize=(6,4))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Purples')
-plt.title("Confusion Matrix - Final Combined Model")
+plt.title("Confusion Matrix")
 plt.xlabel("Predicted")
 plt.ylabel("True")
 plt.show()
 
-# 🔷 ROC و PR Curve
-if y_pred_probs.shape[1] == 2:
-    auc_score = roc_auc_score(y_true, y_pred_probs[:, 1])
-    print(f"🔵 ROC AUC: {auc_score:.4f}")
+# ROC و PR Curve
+auc_score = roc_auc_score(y_true, y_pred_probs[:,1])
+print(f"🔵 ROC AUC: {auc_score:.4f}")
 
-    fpr, tpr, _ = roc_curve(y_true, y_pred_probs[:, 1])
-    precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:, 1])
-    roc_auc = auc(fpr, tpr)
+fpr, tpr, _     = roc_curve(y_true, y_pred_probs[:,1])
+precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:,1])
+roc_auc         = auc(fpr, tpr)
 
-    plt.figure(figsize=(12, 5))
+plt.figure(figsize=(12,5))
 
-    plt.subplot(1, 2, 1)
-    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve - Combined Model")
-    plt.legend()
+plt.subplot(1,2,1)
+plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend()
 
-    plt.subplot(1, 2, 2)
-    plt.plot(recall, precision, label="Precision-Recall")
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title("Precision-Recall Curve - Combined Model")
-    plt.legend()
+plt.subplot(1,2,2)
+plt.plot(recall, precision, label="Precision-Recall")
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision-Recall Curve")
+plt.legend()
 
-    plt.tight_layout()
-    plt.show()
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+# from tensorflow.keras.optimizers import Adam
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+# from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+# import numpy as np
+
+# # ---------------- 1. استخراج ویژگی‌های میانی از BERT و Net ----------------
+# # پیدا کردن Dense(64) از contexmodel
+# intermediate_bert_layer = None
+# for layer in reversed(contexmodel.layers):
+#     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
+#         intermediate_bert_layer = layer.name
+#         break
+# assert intermediate_bert_layer is not None, "❌ لایه Dense با خروجی 64 در contexmodel پیدا نشد!"
+
+# bert_feature_model = Model(inputs=contexmodel.input, outputs=contexmodel.get_layer(intermediate_bert_layer).output)
+
+# # پیدا کردن Dense(64) از Netmodel
+# intermediate_net_layer = None
+# for layer in reversed(Netmodel.layers):
+#     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
+#         intermediate_net_layer = layer.name
+#         break
+# assert intermediate_net_layer is not None, "❌ لایه Dense با خروجی 64 در Netmodel پیدا نشد!"
+
+# net_feature_model = Model(inputs=Netmodel.input, outputs=Netmodel.get_layer(intermediate_net_layer).output)
+
+# # پیش‌بینی ویژگی‌ها
+# X_bert = bert_feature_model.predict([input_ids, attention_mask])
+# X_net = net_feature_model.predict(X)
+
+# # ---------------- 2. ترکیب ویژگی‌ها ----------------
+# X_combined = np.concatenate([X_bert, X_net], axis=1)
+
+# # تقسیم داده‌ها
+# X_train = X_combined[0:803]
+# X_val   = X_combined[803:917]
+# X_test  = X_combined[917:]
+
+# y_train_combined = labels[0:803]
+# y_val_combined   = labels[803:917]
+# y_test_combined  = labels[917:]
+
+# # ---------------- 3. ساخت مدل نهایی ترکیبی ----------------
+# final_input = Input(shape=(X_train.shape[1],))
+# x = Dense(64, activation='relu')(final_input)
+# x = Dropout(0.3)(x)
+# final_output = Dense(2, activation='softmax')(x)
+
+# final_model = Model(inputs=final_input, outputs=final_output)
+# final_model.compile(optimizer=Adam(learning_rate=1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# # ---------------- 4. آموزش مدل نهایی با ذخیره بهترین نسخه ----------------
+# early_stop = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+# checkpoint = ModelCheckpoint("MultiView-RumorDetection/best_combined_model.hdf5", monitor="val_accuracy", save_best_only=True)
+
+# final_model.fit(
+#     X_train, y_train_combined,
+#     validation_data=(X_val, y_val_combined),
+#     batch_size=8,
+#     epochs=150,
+#     callbacks=[early_stop, checkpoint]
+# )
+
+# # ---------------- 5. ارزیابی مدل نهایی ----------------
+# loss, acc = final_model.evaluate(X_test, y_test_combined)
+# print(f"\n✅ Final Combined Model Accuracy: {acc:.4f}")
+
+# y_true = y_test_combined.argmax(axis=1)
+# y_pred_probs = final_model.predict(X_test)
+# y_pred = y_pred_probs.argmax(axis=1)
+
+# # 📋 گزارش آماری
+# print("📌 Classification Report - Combined:")
+# print(classification_report(y_true, y_pred, digits=4))
+
+# # 📊 Confusion Matrix
+# cm = confusion_matrix(y_true, y_pred)
+# plt.figure(figsize=(6, 4))
+# sns.heatmap(cm, annot=True, fmt='d', cmap='Purples')
+# plt.title("Confusion Matrix - Final Combined Model")
+# plt.xlabel("Predicted")
+# plt.ylabel("True")
+# plt.show()
+
+# # 🔷 ROC و PR Curve
+# if y_pred_probs.shape[1] == 2:
+#     auc_score = roc_auc_score(y_true, y_pred_probs[:, 1])
+#     print(f"🔵 ROC AUC: {auc_score:.4f}")
+
+#     fpr, tpr, _ = roc_curve(y_true, y_pred_probs[:, 1])
+#     precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:, 1])
+#     roc_auc = auc(fpr, tpr)
+
+#     plt.figure(figsize=(12, 5))
+
+#     plt.subplot(1, 2, 1)
+#     plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+#     plt.plot([0, 1], [0, 1], 'k--')
+#     plt.xlabel("False Positive Rate")
+#     plt.ylabel("True Positive Rate")
+#     plt.title("ROC Curve - Combined Model")
+#     plt.legend()
+
+#     plt.subplot(1, 2, 2)
+#     plt.plot(recall, precision, label="Precision-Recall")
+#     plt.xlabel("Recall")
+#     plt.ylabel("Precision")
+#     plt.title("Precision-Recall Curve - Combined Model")
+#     plt.legend()
+
+#     plt.tight_layout()
+#     plt.show()
 
 
 

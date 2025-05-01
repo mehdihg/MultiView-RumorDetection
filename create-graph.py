@@ -139,33 +139,33 @@ label=[]
 centrality=[]
 centrality.append(['id','label','degree','degreecent','closeness_centrality','pagerank'])
 
-for node in range(600,602):
+for node in range(0,803):
      centrality.append([df.values[node][1],g.nodes[int(str(df.values[node][1])[0:-4])]['label'],g.degree[int(str(df.values[node][1])[0:-4])],nx.degree_centrality(g)[int(str(df.values[node][1])[0:-4])],nx.closeness_centrality(g,u=None, distance='weight', wf_improved=True)[int(str(df.values[node][1])[0:-4])],nx.pagerank(g,weight='weight', max_iter=200,alpha=0.9)[int(str(df.values[node][1])[0:-4])]])
      print('centrality', node ,' add',centrality[-1])
 
 centrality2=np.array(centrality)
 df3 = pd.DataFrame(centrality2)
-df3.to_excel(r'/content/MultiView-RumorDetection/new700.xlsx','Sheet1')
+df3.to_excel(r'/content/MultiView-RumorDetection/train.xlsx','Sheet1')
 
 
 centrality=[]
 centrality.append(['id','label','degree','degreecent','closeness_centrality','pagerank'])
 
-for node in range(700,800):
+for node in range(803,917):
     centrality.append([df.values[node][1],g.nodes[int(str(df.values[node][1])[0:-4])]['label'],g.degree[int(str(df.values[node][1])[0:-4])],nx.degree_centrality(g)[int(str(df.values[node][1])[0:-4])],nx.closeness_centrality(g,u=None, distance='weight', wf_improved=True)[int(str(df.values[node][1])[0:-4])],nx.pagerank(g,weight='weight', max_iter=200,alpha=0.9)[int(str(df.values[node][1])[0:-4])]])
     print('centrality', node ,' add',centrality[-1])
 
 centrality2=np.array(centrality)
 df3 = pd.DataFrame(centrality2)
-df3.to_excel(r'/content/MultiView-RumorDetection/new800.xlsx','Sheet1')
+df3.to_excel(r'/content/MultiView-RumorDetection/validation.xlsx','Sheet1')
 
 centrality=[]
 centrality.append(['id','label','degree','degreecent','closeness_centrality','pagerank'])
 
-for node in range(800,900):
+for node in range(917, len(df)):
     centrality.append([df.values[node][1],g.nodes[int(str(df.values[node][1])[0:-4])]['label'],g.degree[int(str(df.values[node][1])[0:-4])],nx.degree_centrality(g)[int(str(df.values[node][1])[0:-4])],nx.closeness_centrality(g,u=None, distance='weight', wf_improved=True)[int(str(df.values[node][1])[0:-4])],nx.pagerank(g,weight='weight', max_iter=200,alpha=0.9)[int(str(df.values[node][1])[0:-4])]])
     print('centrality', node ,' add',centrality[-1])
     
 centrality2=np.array(centrality)
 df3 = pd.DataFrame(centrality2)
-df3.to_excel(r'/content/MultiView-RumorDetection/new900.xlsx','Sheet1')
+df3.to_excel(r'/content/MultiView-RumorDetection/test.xlsx','Sheet1')
