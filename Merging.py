@@ -311,240 +311,240 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 
 
 # -*- coding: utf-8 -*-
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch_geometric.data import Data
-from torch_geometric.nn import GATConv
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-import networkx as nx
-import pandas as pd
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-import string
-import matplotlib.pyplot as plt
-import numpy as np
+# import os
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+# import torch.nn.functional as F
+# from torch_geometric.data import Data
+# from torch_geometric.nn import GATConv
+# from sklearn.model_selection import StratifiedKFold
+# from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+# import networkx as nx
+# import pandas as pd
+# import nltk
+# from nltk.corpus import stopwords
+# from nltk.tokenize import word_tokenize
+# import string
+# import matplotlib.pyplot as plt
+# import numpy as np
 
-# دانلود منابع NLTK
-nltk.download('punkt')
-nltk.download('stopwords')
+# # دانلود منابع NLTK
+# nltk.download('punkt')
+# nltk.download('stopwords')
 
-# 1. Load data
-gnn_df = pd.read_excel("/content/MultiView-RumorDetection/shufflefilenew2.xlsx")
-with open('/content/MultiView-RumorDetection/labelf.txt') as f: gnn_label_lines = f.readlines()
-with open('/content/MultiView-RumorDetection/source_tweetsf.txt') as f: gnn_text_lines = f.readlines()
+# # 1. Load data
+# gnn_df = pd.read_excel("/content/MultiView-RumorDetection/shufflefilenew2.xlsx")
+# with open('/content/MultiView-RumorDetection/labelf.txt') as f: gnn_label_lines = f.readlines()
+# with open('/content/MultiView-RumorDetection/source_tweetsf.txt') as f: gnn_text_lines = f.readlines()
 
-gnn_stopwords = set(stopwords.words('english'))
-gnn_graph = nx.Graph()
-gnn_texts, gnn_labels = [], []
+# gnn_stopwords = set(stopwords.words('english'))
+# gnn_graph = nx.Graph()
+# gnn_texts, gnn_labels = [], []
 
-# Prepare graph and text data
-for i in range(len(gnn_df)):
-    gnn_tid_str = str(gnn_df.values[i][1])[:-4]
-    gnn_nid = int(gnn_tid_str)
-    gnn_graph.add_node(gnn_nid)
+# # Prepare graph and text data
+# for i in range(len(gnn_df)):
+#     gnn_tid_str = str(gnn_df.values[i][1])[:-4]
+#     gnn_nid = int(gnn_tid_str)
+#     gnn_graph.add_node(gnn_nid)
 
-    # برچسب
-    for line in gnn_label_lines:
-        if gnn_tid_str in line:
-            gnn_labels.append('non-rumor' if 'non-rumor' in line else 'rumor')
-            break
+#     # برچسب
+#     for line in gnn_label_lines:
+#         if gnn_tid_str in line:
+#             gnn_labels.append('non-rumor' if 'non-rumor' in line else 'rumor')
+#             break
 
-    # متن
-    for line in gnn_text_lines:
-        if gnn_tid_str in line:
-            sep_idx = line.find('\t', 1, 20)
-            gnn_texts.append(line[sep_idx+1:])
-            break
+#     # متن
+#     for line in gnn_text_lines:
+#         if gnn_tid_str in line:
+#             sep_idx = line.find('\t', 1, 20)
+#             gnn_texts.append(line[sep_idx+1:])
+#             break
 
-    # تعداد توکن‌های فیلتر شده
-    gnn_tokens = word_tokenize(gnn_texts[-1])
-    gnn_filtered = [w for w in gnn_tokens if w.lower() not in gnn_stopwords and w not in string.punctuation]
-    gnn_graph.nodes[gnn_nid]['tokens'] = len(gnn_filtered)
-    gnn_graph.nodes[gnn_nid]['label']  = gnn_labels[-1]
+#     # تعداد توکن‌های فیلتر شده
+#     gnn_tokens = word_tokenize(gnn_texts[-1])
+#     gnn_filtered = [w for w in gnn_tokens if w.lower() not in gnn_stopwords and w not in string.punctuation]
+#     gnn_graph.nodes[gnn_nid]['tokens'] = len(gnn_filtered)
+#     gnn_graph.nodes[gnn_nid]['label']  = gnn_labels[-1]
 
-    # هشتگ
-    gnn_hashtags = [w for w in gnn_texts[-1].split() if w.startswith('#')]
-    gnn_graph.nodes[gnn_nid]['num_hashtags'] = len(gnn_hashtags)
-    gnn_graph.nodes[gnn_nid]['text_length'] = len(gnn_texts[-1])
-    if gnn_hashtags:
-        gnn_graph.nodes[gnn_nid]['hashtag'] = gnn_hashtags[0]
+#     # هشتگ
+#     gnn_hashtags = [w for w in gnn_texts[-1].split() if w.startswith('#')]
+#     gnn_graph.nodes[gnn_nid]['num_hashtags'] = len(gnn_hashtags)
+#     gnn_graph.nodes[gnn_nid]['text_length'] = len(gnn_texts[-1])
+#     if gnn_hashtags:
+#         gnn_graph.nodes[gnn_nid]['hashtag'] = gnn_hashtags[0]
 
-# 2. Add edges with debug and self-loop filter
-gnn_edge_dir = "/content/MultiView-RumorDetection/nontrue15162/"
-for gnn_file in os.listdir(gnn_edge_dir):
-    if not gnn_file.endswith(".txt"): continue
-    gnn_srcid = gnn_file[:-4]
-    if not gnn_graph.has_node(int(gnn_srcid)): continue
-    with open(os.path.join(gnn_edge_dir, gnn_file)) as f:
-        for line in f:
-            if "->" not in line: continue
-            try:
-                left, right = line.strip().split("->")
-                lparts, rparts = eval(left), eval(right)
-                sid = int(lparts[1]) if lparts[0] != 'ROOT' else int(gnn_srcid)
-                tid = int(rparts[1])
-                wgt = float(rparts[2])
-            except Exception as e:
-                print(f"Error parsing line '{line.strip()}': {e}")
-                continue
+# # 2. Add edges with debug and self-loop filter
+# gnn_edge_dir = "/content/MultiView-RumorDetection/nontrue15162/"
+# for gnn_file in os.listdir(gnn_edge_dir):
+#     if not gnn_file.endswith(".txt"): continue
+#     gnn_srcid = gnn_file[:-4]
+#     if not gnn_graph.has_node(int(gnn_srcid)): continue
+#     with open(os.path.join(gnn_edge_dir, gnn_file)) as f:
+#         for line in f:
+#             if "->" not in line: continue
+#             try:
+#                 left, right = line.strip().split("->")
+#                 lparts, rparts = eval(left), eval(right)
+#                 sid = int(lparts[1]) if lparts[0] != 'ROOT' else int(gnn_srcid)
+#                 tid = int(rparts[1])
+#                 wgt = float(rparts[2])
+#             except Exception as e:
+#                 print(f"Error parsing line '{line.strip()}': {e}")
+#                 continue
 
-            # Debug print
-            print(f"DEBUG: sid={sid}, tid={tid}, weight={wgt}")
+#             # Debug print
+#             print(f"DEBUG: sid={sid}, tid={tid}, weight={wgt}")
 
-            # اضافه کردن یال فقط اگر واقعی باشد
-            if sid != tid and gnn_graph.has_node(sid) and gnn_graph.has_node(tid):
-                gnn_graph.add_edge(sid, tid, weight=wgt)
+#             # اضافه کردن یال فقط اگر واقعی باشد
+#             if sid != tid and gnn_graph.has_node(sid) and gnn_graph.has_node(tid):
+#                 gnn_graph.add_edge(sid, tid, weight=wgt)
 
-# 3. Centrality features
-gnn_deg_c   = nx.degree_centrality(gnn_graph)
-gnn_clus    = nx.clustering(gnn_graph)
-gnn_bet_c   = nx.betweenness_centrality(gnn_graph)
-gnn_close_c = nx.closeness_centrality(gnn_graph)
-gnn_prank   = nx.pagerank(gnn_graph)
-for n in gnn_graph.nodes():
-    gnn_graph.nodes[n]['degree_centrality'] = gnn_deg_c[n]
-    gnn_graph.nodes[n]['clustering']        = gnn_clus[n]
-    gnn_graph.nodes[n]['betweenness']       = gnn_bet_c[n]
-    gnn_graph.nodes[n]['closeness']         = gnn_close_c[n]
-    gnn_graph.nodes[n]['pagerank']          = gnn_prank[n]
+# # 3. Centrality features
+# gnn_deg_c   = nx.degree_centrality(gnn_graph)
+# gnn_clus    = nx.clustering(gnn_graph)
+# gnn_bet_c   = nx.betweenness_centrality(gnn_graph)
+# gnn_close_c = nx.closeness_centrality(gnn_graph)
+# gnn_prank   = nx.pagerank(gnn_graph)
+# for n in gnn_graph.nodes():
+#     gnn_graph.nodes[n]['degree_centrality'] = gnn_deg_c[n]
+#     gnn_graph.nodes[n]['clustering']        = gnn_clus[n]
+#     gnn_graph.nodes[n]['betweenness']       = gnn_bet_c[n]
+#     gnn_graph.nodes[n]['closeness']         = gnn_close_c[n]
+#     gnn_graph.nodes[n]['pagerank']          = gnn_prank[n]
 
-# 4. Build edge_index and edge_weight
-gnn_edge_index_list, gnn_edge_weight_list = [], []
-for u, v, d in gnn_graph.edges(data=True):
-    gnn_edge_index_list.append([u, v])
-    gnn_edge_index_list.append([v, u])
-    w = d.get('weight', 1.0)
-    gnn_edge_weight_list.extend([w, w])
+# # 4. Build edge_index and edge_weight
+# gnn_edge_index_list, gnn_edge_weight_list = [], []
+# for u, v, d in gnn_graph.edges(data=True):
+#     gnn_edge_index_list.append([u, v])
+#     gnn_edge_index_list.append([v, u])
+#     w = d.get('weight', 1.0)
+#     gnn_edge_weight_list.extend([w, w])
 
-gnn_edge_index  = torch.tensor(gnn_edge_index_list,  dtype=torch.long).t().contiguous()
-gnn_edge_weight = torch.tensor(gnn_edge_weight_list, dtype=torch.float)
+# gnn_edge_index  = torch.tensor(gnn_edge_index_list,  dtype=torch.long).t().contiguous()
+# gnn_edge_weight = torch.tensor(gnn_edge_weight_list, dtype=torch.float)
 
-# 5. Node features & labels
-gnn_node_list = list(gnn_graph.nodes())
-gnn_feat, gnn_label_vec = [], []
-for n in gnn_node_list:
-    d = gnn_graph.nodes[n]
-    gnn_feat.append([
-        d['tokens'],
-        d['num_hashtags'],
-        d['text_length'],
-        d['degree_centrality'],
-        d['clustering'],
-        d['betweenness'],
-        d['closeness'],
-        d['pagerank']
-    ])
-    gnn_label_vec.append(1 if d['label'] == 'rumor' else 0)
+# # 5. Node features & labels
+# gnn_node_list = list(gnn_graph.nodes())
+# gnn_feat, gnn_label_vec = [], []
+# for n in gnn_node_list:
+#     d = gnn_graph.nodes[n]
+#     gnn_feat.append([
+#         d['tokens'],
+#         d['num_hashtags'],
+#         d['text_length'],
+#         d['degree_centrality'],
+#         d['clustering'],
+#         d['betweenness'],
+#         d['closeness'],
+#         d['pagerank']
+#     ])
+#     gnn_label_vec.append(1 if d['label'] == 'rumor' else 0)
 
-gnn_x = torch.tensor(gnn_feat, dtype=torch.float)
-gnn_y = torch.tensor(gnn_label_vec, dtype=torch.long)
+# gnn_x = torch.tensor(gnn_feat, dtype=torch.float)
+# gnn_y = torch.tensor(gnn_label_vec, dtype=torch.long)
 
-gnn_data = Data(x=gnn_x, edge_index=gnn_edge_index, edge_attr=gnn_edge_weight, y=gnn_y)
+# gnn_data = Data(x=gnn_x, edge_index=gnn_edge_index, edge_attr=gnn_edge_weight, y=gnn_y)
 
-# 6. Improved GAT model with BatchNorm and Dropout
-class ImprovedGAT(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
-        super(ImprovedGAT, self).__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, dropout=0.6)
-        self.bn1 = nn.BatchNorm1d(hidden_channels * 8)
-        self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, dropout=0.6)
-        self.bn2 = nn.BatchNorm1d(hidden_channels * 8)
-        self.conv3 = GATConv(hidden_channels * 8, out_channels, heads=1, concat=False, dropout=0.6)
+# # 6. Improved GAT model with BatchNorm and Dropout
+# class ImprovedGAT(nn.Module):
+#     def __init__(self, in_channels, hidden_channels, out_channels):
+#         super(ImprovedGAT, self).__init__()
+#         self.conv1 = GATConv(in_channels, hidden_channels, heads=8, concat=True, dropout=0.6)
+#         self.bn1 = nn.BatchNorm1d(hidden_channels * 8)
+#         self.conv2 = GATConv(hidden_channels * 8, hidden_channels, heads=8, concat=True, dropout=0.6)
+#         self.bn2 = nn.BatchNorm1d(hidden_channels * 8)
+#         self.conv3 = GATConv(hidden_channels * 8, out_channels, heads=1, concat=False, dropout=0.6)
 
-    def forward(self, x, edge_index):
-        x = F.elu(self.conv1(x, edge_index))
-        x = self.bn1(x)
-        x = F.elu(self.conv2(x, edge_index))
-        x = self.bn2(x)
-        x = self.conv3(x, edge_index)
-        return F.log_softmax(x, dim=1)
+#     def forward(self, x, edge_index):
+#         x = F.elu(self.conv1(x, edge_index))
+#         x = self.bn1(x)
+#         x = F.elu(self.conv2(x, edge_index))
+#         x = self.bn2(x)
+#         x = self.conv3(x, edge_index)
+#         return F.log_softmax(x, dim=1)
 
-gnn_model = ImprovedGAT(in_channels=gnn_x.shape[1], hidden_channels=64, out_channels=2)
-gnn_optimizer = optim.Adam(gnn_model.parameters(), lr=0.005, weight_decay=5e-4)
-gnn_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(gnn_optimizer, mode='min', factor=0.7, patience=10)
-gnn_criterion = nn.CrossEntropyLoss()
+# gnn_model = ImprovedGAT(in_channels=gnn_x.shape[1], hidden_channels=64, out_channels=2)
+# gnn_optimizer = optim.Adam(gnn_model.parameters(), lr=0.005, weight_decay=5e-4)
+# gnn_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(gnn_optimizer, mode='min', factor=0.7, patience=10)
+# gnn_criterion = nn.CrossEntropyLoss()
 
-# 7. K-Fold Cross-Validation
-kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+# # 7. K-Fold Cross-Validation
+# kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-def gnn_train(train_idx, val_idx):
-    gnn_model.train()
-    gnn_optimizer.zero_grad()
-    out = gnn_model(gnn_data.x, gnn_data.edge_index)
-    loss = gnn_criterion(out[train_idx], gnn_data.y[train_idx])
-    loss.backward()
-    gnn_optimizer.step()
-    return loss.item()
+# def gnn_train(train_idx, val_idx):
+#     gnn_model.train()
+#     gnn_optimizer.zero_grad()
+#     out = gnn_model(gnn_data.x, gnn_data.edge_index)
+#     loss = gnn_criterion(out[train_idx], gnn_data.y[train_idx])
+#     loss.backward()
+#     gnn_optimizer.step()
+#     return loss.item()
 
-def gnn_evaluate(mask):
-    gnn_model.eval()
-    with torch.no_grad():
-        out = gnn_model(gnn_data.x, gnn_data.edge_index)
-        pred = out[mask].argmax(dim=1)
-        true = gnn_data.y[mask].cpu().numpy()
-        pred = pred.cpu().numpy()
-        print("Accuracy:", accuracy_score(true, pred))
-        print("Confusion Matrix:\n", confusion_matrix(true, pred))
-        print("Classification Report:\n", classification_report(true, pred))
+# def gnn_evaluate(mask):
+#     gnn_model.eval()
+#     with torch.no_grad():
+#         out = gnn_model(gnn_data.x, gnn_data.edge_index)
+#         pred = out[mask].argmax(dim=1)
+#         true = gnn_data.y[mask].cpu().numpy()
+#         pred = pred.cpu().numpy()
+#         print("Accuracy:", accuracy_score(true, pred))
+#         print("Confusion Matrix:\n", confusion_matrix(true, pred))
+#         print("Classification Report:\n", classification_report(true, pred))
 
-# 8. Train/Evaluate with Cross-Validation
-for fold, (train_idx, val_idx) in enumerate(kf.split(gnn_x, gnn_y)):
-    print(f"\n=== Fold {fold+1} ===")
-    gnn_data.train_mask = torch.zeros(gnn_data.num_nodes, dtype=torch.bool)
-    gnn_data.val_mask   = torch.zeros(gnn_data.num_nodes, dtype=torch.bool)
-    gnn_data.train_mask[train_idx] = True
-    gnn_data.val_mask[val_idx]     = True
+# # 8. Train/Evaluate with Cross-Validation
+# for fold, (train_idx, val_idx) in enumerate(kf.split(gnn_x, gnn_y)):
+#     print(f"\n=== Fold {fold+1} ===")
+#     gnn_data.train_mask = torch.zeros(gnn_data.num_nodes, dtype=torch.bool)
+#     gnn_data.val_mask   = torch.zeros(gnn_data.num_nodes, dtype=torch.bool)
+#     gnn_data.train_mask[train_idx] = True
+#     gnn_data.val_mask[val_idx]     = True
 
-    best_loss, patience = float('inf'), 0
-    for epoch in range(1, 201):
-        loss = gnn_train(train_idx, val_idx)
-        print(f"[Epoch {epoch:03d}] Loss: {loss:.4f}")
-        gnn_scheduler.step(loss)
-        if loss < best_loss:
-            best_loss, patience = loss, 0
-            torch.save(gnn_model.state_dict(), f"gnn_best_model_fold{fold+1}.pth")
-        else:
-            patience += 1
-            if patience >= 40:
-                print("Early stopping.")
-                break
+#     best_loss, patience = float('inf'), 0
+#     for epoch in range(1, 201):
+#         loss = gnn_train(train_idx, val_idx)
+#         print(f"[Epoch {epoch:03d}] Loss: {loss:.4f}")
+#         gnn_scheduler.step(loss)
+#         if loss < best_loss:
+#             best_loss, patience = loss, 0
+#             torch.save(gnn_model.state_dict(), f"gnn_best_model_fold{fold+1}.pth")
+#         else:
+#             patience += 1
+#             if patience >= 40:
+#                 print("Early stopping.")
+#                 break
 
-    # Final evaluation
-    gnn_model.load_state_dict(torch.load(f"gnn_best_model_fold{fold+1}.pth"))
-    print(f"=== Final Test Evaluation for Fold {fold+1} ===")
-    gnn_evaluate(gnn_data.val_mask)
+#     # Final evaluation
+#     gnn_model.load_state_dict(torch.load(f"gnn_best_model_fold{fold+1}.pth"))
+#     print(f"=== Final Test Evaluation for Fold {fold+1} ===")
+#     gnn_evaluate(gnn_data.val_mask)
 
-# 9. Quick Graph Sanity Checks
-num_selfloops        = nx.number_of_selfloops(gnn_graph)
-nonself_edges_count  = sum(1 for u, v in gnn_graph.edges() if u != v)
-components           = list(nx.connected_components(gnn_graph))
-sizes                = sorted((len(c) for c in components), reverse=True)
+# # 9. Quick Graph Sanity Checks
+# num_selfloops        = nx.number_of_selfloops(gnn_graph)
+# nonself_edges_count  = sum(1 for u, v in gnn_graph.edges() if u != v)
+# components           = list(nx.connected_components(gnn_graph))
+# sizes                = sorted((len(c) for c in components), reverse=True)
 
-print(f"🔍 تعداد خود-یال‌ها: {num_selfloops}")
-print(f"🔍 کل یال‌ها: {gnn_graph.number_of_edges()}, یال‌های بین گره‌های مختلف: {nonself_edges_count}")
-if nonself_edges_count == 0:
-    print("⚠️ هیچ یالی بین گره‌های مختلف وجود ندارد! گراف صرفاً شامل خود‑یال است.")
+# print(f"🔍 تعداد خود-یال‌ها: {num_selfloops}")
+# print(f"🔍 کل یال‌ها: {gnn_graph.number_of_edges()}, یال‌های بین گره‌های مختلف: {nonself_edges_count}")
+# if nonself_edges_count == 0:
+#     print("⚠️ هیچ یالی بین گره‌های مختلف وجود ندارد! گراف صرفاً شامل خود‑یال است.")
 
-print(f"🔍 تعداد مؤلفه‌های متصل: {len(components)}, بزرگ‌ترین مؤلفه‌ها: {sizes[:5]}")
-if len(components) > 1:
-    print("⚠️ گراف تکه‌تکه (disconnected) است؛ ممکن است گره‌ها ایزوله باشند.")
+# print(f"🔍 تعداد مؤلفه‌های متصل: {len(components)}, بزرگ‌ترین مؤلفه‌ها: {sizes[:5]}")
+# if len(components) > 1:
+#     print("⚠️ گراف تکه‌تکه (disconnected) است؛ ممکن است گره‌ها ایزوله باشند.")
 
-centralities         = {
-    'degree_centrality': gnn_deg_c,
-    'betweenness':       gnn_bet_c,
-    'closeness':         gnn_close_c,
-    'pagerank':          gnn_prank
-}
-for name, dist in centralities.items():
-    arr = np.array(list(dist.values()))
-    print(f"🔍 {name}: min={arr.min():.6f}, max={arr.max():.6f}, var={arr.var():.6e}")
-    if arr.var() < 1e-8:
-        print(f"⚠️ همهٔ گره‌ها در '{name}' تقریباً یک مقدار یکسان دارند؛ ممکن است محاسبهٔ ویژگی اشتباه باشد.")
+# centralities         = {
+#     'degree_centrality': gnn_deg_c,
+#     'betweenness':       gnn_bet_c,
+#     'closeness':         gnn_close_c,
+#     'pagerank':          gnn_prank
+# }
+# for name, dist in centralities.items():
+#     arr = np.array(list(dist.values()))
+#     print(f"🔍 {name}: min={arr.min():.6f}, max={arr.max():.6f}, var={arr.var():.6e}")
+#     if arr.var() < 1e-8:
+#         print(f"⚠️ همهٔ گره‌ها در '{name}' تقریباً یک مقدار یکسان دارند؛ ممکن است محاسبهٔ ویژگی اشتباه باشد.")
 
 
 
@@ -746,12 +746,25 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from tensorflow.keras.optimizers import Adam
 
 # --- Load & preprocess data ---
-df = pd.read_excel("/content/MultiView-RumorDetection/centstructtime.xlsx")
+df_raw = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=None)
 
-idd = df.values[:, 1]
-X = df.values[:, 3:].astype('float32')
+# بررسی اولین چند سطر برای بررسی محتوای آن‌ها
+print(df_raw.head(3))
 
-# Scaling (standardization instead of MinMax)
+# تنظیم header بر اساس سطر دوم (index=1)
+df = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=1)
+
+# تمیز کردن نام ستون‌ها (در صورتی که شامل فضاهای اضافی باشد)
+df.columns = df.columns.str.strip()
+
+# بررسی ستون‌ها
+print(df.columns.tolist())
+
+# استخراج داده‌ها
+idd = df.values[:, 0]  # فرض می‌کنیم ستون اول (index 0) شناسه است
+X = df[['degree', 'degreecent', 'closeness_centrality', 'pagerank']].astype('float32').values
+
+# Scaling (standardization)
 scaler = StandardScaler()
 X = scaler.fit_transform(X)
 
@@ -765,8 +778,8 @@ y = to_categorical(y)
 X = np.expand_dims(X, axis=2)
 
 # Split
-X_train, X_val, X_test = X[0:803], X[803:917], X[917:]
-y_train, y_val, y_test = y[0:803], y[803:917], y[917:]
+X_train, X_val, X_test = X[0:630], X[630:730], X[730:]
+y_train, y_val, y_test = y[0:630], y[630:730], y[730:]
 
 # --- Model with Conv1D + BiLSTM + Attention ---
 input_layer = Input(shape=(X.shape[1], 1))
@@ -805,7 +818,7 @@ Netmodel.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
     batch_size=8,
-    epochs=2,
+    epochs=150,
     callbacks=[early_stopping, checkpoint]
 )
 
