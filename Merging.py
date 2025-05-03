@@ -550,6 +550,181 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 
 
 
+import numpy as np
+import pandas as pd
+import keras
+from sklearn.preprocessing import LabelEncoder
+from keras.preprocessing.text import Tokenizer
+from keras_preprocessing.sequence import pad_sequences 
+from tensorflow.keras.layers import Input, Dense, Dropout, Conv1D, GlobalMaxPooling1D, LayerNormalization, MultiHeadAttention
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from transformers import TFBertModel, BertTokenizer
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc, precision_recall_curve
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+# فرض می‌کنیم که tweets و label شما به این صورت هستند
+import numpy as np
+import pandas as pd
+from keras.preprocessing.text import Tokenizer
+from keras_preprocessing.sequence import pad_sequences
+from sklearn.preprocessing import LabelEncoder
+import keras
+from tensorflow.keras.layers import Input, Embedding, LSTM, Dropout, Conv1D, MaxPooling1D, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+import numpy as np
+import pandas as pd
+from keras import layers
+from keras.layers import Dense, Input, GRU, Conv1D, MaxPooling1D, LSTM, Embedding, Dropout, Activation, Reshape
+from keras.optimizers import Adam
+from keras.models import Model
+from keras.preprocessing.text import Tokenizer
+from keras_preprocessing.sequence import pad_sequences
+from keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import seaborn as sns
+import matplotlib.pyplot as plt
+import nltk
+
+# دانلود داده‌های مورد نیاز NLTK
+nltk.download('vader_lexicon')
+
+# داده‌ها (توییت‌ها و برچسب‌ها)
+tweets_data = np.array(tweet)  # توییت‌ها (tweets_data)
+labels_data = np.array(label)  # برچسب‌ها (labels_data)
+
+# --- گام اول: تحلیل احساسات با VADER ---
+sentiment_analyzer = SentimentIntensityAnalyzer()
+sentiment_labels = []
+
+for tweet_text in tweets_data:
+    sentiment_score = sentiment_analyzer.polarity_scores(tweet_text)
+    
+    # تقسیم‌بندی احساسات بر اساس مقدار compound
+    if sentiment_score['compound'] >= 0.05:
+        sentiment = 1  # احساس مثبت
+    elif sentiment_score['compound'] <= -0.05:
+        sentiment = 0  # احساس منفی
+    else:
+        sentiment = 2  # احساس خنثی
+    
+    sentiment_labels.append(sentiment)
+
+sentiment_labels = np.array(sentiment_labels)
+
+# --- گام دوم: آماده‌سازی داده‌ها برای مدل ---
+tweets_tokenizer = Tokenizer()  # ایجاد توکنایزر برای توییت‌ها
+tweets_tokenizer.fit_on_texts(tweets_data)
+tweets_sequences = tweets_tokenizer.texts_to_sequences(tweets_data)
+tweets_word_index = tweets_tokenizer.word_index
+
+# کدگذاری برچسب‌ها
+labels_encoder = LabelEncoder()  # ایجاد LabelEncoder برای برچسب‌ها
+labels_encoder.fit(labels_data)
+encoded_labels = labels_encoder.transform(labels_data)
+encoded_labels = to_categorical(np.asarray(encoded_labels))
+
+# محاسبه طول بیشترین دنباله
+MAX_SEQUENCE_LENGTH = max([len(tweet.split()) for tweet in tweets_data])  # طول بیشترین دنباله
+tweets_data_padded = pad_sequences(tweets_sequences, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
+
+# --- گام سوم: آماده‌سازی داده‌های احساسات ---
+sentiment_labels_categorical = to_categorical(sentiment_labels, num_classes=3)
+
+# --- گام چهارم: تقسیم داده‌ها به سه قسمت ---
+# تقسیم داده‌ها به دو بخش: آموزش + اعتبارسنجی و تست (80% آموزش + اعتبارسنجی و 20% تست)
+tweets_train_val, tweets_test, labels_train_val, labels_test = train_test_split(
+    tweets_data_padded, encoded_labels, test_size=0.2, random_state=42
+)
+
+# تقسیم داده‌های آموزش به دو بخش: آموزش و اعتبارسنجی (70% آموزش و 10% اعتبارسنجی از کل داده‌ها)
+tweets_train, tweets_val, labels_train, labels_val = train_test_split(
+    tweets_train_val, labels_train_val, test_size=0.125, random_state=42  # 0.125 * 0.8 = 0.1 (10% اعتبارسنجی)
+)
+
+# --- گام پنجم: آماده‌سازی مدل ---
+input_layer = Input(shape=(MAX_SEQUENCE_LENGTH,))
+embedding_layer = Embedding(len(tweets_word_index) + 1, 100, input_length=MAX_SEQUENCE_LENGTH)(input_layer)
+lstm_layer = LSTM(100, return_sequences=False)(embedding_layer)
+dropout_layer = Dropout(0.5)(lstm_layer)
+
+# اصلاح: تبدیل داده‌ها به شکل (batch_size, sequence_length, 1)
+reshape_layer = Reshape((MAX_SEQUENCE_LENGTH, 1))(dropout_layer)
+
+# اعمال کانولوشن روی داده‌های ورودی با ابعاد درست
+conv_layer = Conv1D(128, 3, activation='relu')(reshape_layer)
+maxpool_layer = MaxPooling1D()(conv_layer)
+dense_layer = Dense(64, activation='relu')(maxpool_layer)
+output_layer = Dense(3, activation='softmax')(dense_layer)  # Output layer for 3-class classification
+
+rumor_detection_model = Model(inputs=input_layer, outputs=output_layer)
+
+# کامپایل مدل
+opt = Adam(learning_rate=0.002)
+rumor_detection_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+
+# --- گام ششم: آموزش مدل با داده‌های تقسیم‌شده ---
+callbacks = [
+    keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    keras.callbacks.ModelCheckpoint('rumor_detection_model.h5', monitor='val_accuracy', save_best_only=True)
+]
+
+rumor_detection_model.fit(
+    [tweets_train, sentiment_labels_categorical[:len(tweets_train)]], labels_train,
+    validation_data=([tweets_val, sentiment_labels_categorical[len(tweets_train):len(tweets_train)+len(tweets_val)]], labels_val),
+    epochs=10,
+    batch_size=32,
+    callbacks=callbacks
+)
+
+# --- گام هفتم: ارزیابی مدل با داده‌های تست ---
+loss, accuracy = rumor_detection_model.evaluate([tweets_test, sentiment_labels_categorical[len(tweets_train_val):]], labels_test, verbose=0)
+print(f"✅ مدل شایعه: Accuracy: {accuracy * 100:.2f}% | Loss: {loss:.4f}")
+
+y_pred_probs = rumor_detection_model.predict([tweets_test, sentiment_labels_categorical[len(tweets_train_val):]] )
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+# گزارش‌ها
+print("📌 Classification Report:")
+print(classification_report(labels_test.argmax(axis=1), y_pred, digits=4))
+
+# ماتریس سردرگمی
+cm = confusion_matrix(labels_test.argmax(axis=1), y_pred)
+plt.figure(figsize=(6, 4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.title("Confusion Matrix - Rumor Detection Model")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -637,7 +812,7 @@ contexmodel.compile(
 
 # --- 4. آموزش ---
 callbacks = [
-    EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
+    EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
     ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5',
                     monitor='val_accuracy', save_best_only=True)
 ]
@@ -647,18 +822,18 @@ contexmodel.fit(
     labels[:803],
     validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
     batch_size=8,
-    epochs=1,
+    epochs=30,
     callbacks=callbacks
 )
 
 # --- 5. ارزیابی مدل ---
 loss, accuracy = contexmodel.evaluate(
-    [input_ids[803:917], attention_mask[803:917]], labels[803:917], verbose=0
+    [input_ids[917:], attention_mask[917:]], labels[917:], verbose=0
 )
-print(f"\n✅ مدل روی داده‌ی اعتبارسنجی:\n  Accuracy: {accuracy * 100:.2f}%\n  Loss: {loss:.4f}")
+print(f"\n✅ مدل روی داده‌ی تست:\n  Accuracy: {accuracy * 100:.2f}%\n  Loss: {loss:.4f}")
 
-y_true = labels[803:917].argmax(axis=1)
-y_pred_probs = contexmodel.predict([input_ids[803:917], attention_mask[803:917]])
+y_true = labels[917:].argmax(axis=1)
+y_pred_probs = contexmodel.predict([input_ids[917:], attention_mask[917:]])
 y_pred = y_pred_probs.argmax(axis=1)
 
 # گزارش‌ها
@@ -778,8 +953,8 @@ y = to_categorical(y)
 X = np.expand_dims(X, axis=2)
 
 # Split
-X_train, X_val, X_test = X[0:630], X[630:730], X[730:]
-y_train, y_val, y_test = y[0:630], y[630:730], y[730:]
+X_train, X_val, X_test = X[0:803], X[803:917], X[917:]
+y_train, y_val, y_test = y[0:803], y[803:917], y[917:]
 
 # --- Model with Conv1D + BiLSTM + Attention ---
 input_layer = Input(shape=(X.shape[1], 1))
@@ -1002,7 +1177,7 @@ y_test   = y[split2:]
 
 # ---------------- 8. آموزش مدل ----------------
 early_stop = EarlyStopping(
-    monitor='val_loss', patience=50, restore_best_weights=True
+    monitor='val_loss', patience=25, restore_best_weights=True
 )
 checkpoint = ModelCheckpoint(
     "best_weighted_fusion_model.h5",
@@ -1014,7 +1189,7 @@ history = final_model.fit(
     y = y_train,
     validation_data=(Xb_val + [Xn_val], y_val),
     batch_size=8,
-    epochs=2,
+    epochs=100,
     callbacks=[early_stop, checkpoint]
 )
 
