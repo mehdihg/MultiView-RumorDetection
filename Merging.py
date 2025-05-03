@@ -570,145 +570,125 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # فرض می‌کنیم که tweets و label شما به این صورت هستند
 import numpy as np
 import pandas as pd
-from keras.preprocessing.text import Tokenizer
-from keras_preprocessing.sequence import pad_sequences
+import nltk
 from sklearn.preprocessing import LabelEncoder
-import keras
-from tensorflow.keras.layers import Input, Embedding, LSTM, Dropout, Conv1D, MaxPooling1D, Dense
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
-from sklearn.metrics import classification_report, confusion_matrix
-import seaborn as sns
-import matplotlib.pyplot as plt
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-import numpy as np
-import pandas as pd
-from keras import layers
-from keras.layers import Dense, Input, GRU, Conv1D, MaxPooling1D, LSTM, Embedding, Dropout, Activation, Reshape
-from keras.optimizers import Adam
-from keras.models import Model
-from keras.preprocessing.text import Tokenizer
-from keras_preprocessing.sequence import pad_sequences
 from keras.utils import to_categorical
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import seaborn as sns
+from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from transformers import AutoTokenizer, TFAutoModel
+import tensorflow as tf
 import matplotlib.pyplot as plt
-import nltk
 
-# دانلود داده‌های مورد نیاز NLTK
+# 1) Download VADER lexicon for English sentiment analysis
 nltk.download('vader_lexicon')
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# داده‌ها (توییت‌ها و برچسب‌ها)
-tweets_data = np.array(tweet)  # توییت‌ها (tweets_data)
-labels_data = np.array(label)  # برچسب‌ها (labels_data)
+# 2) Load your English Twitter dataset into numpy arrays
+# Assume `tweet` and `label` are predefined Python lists/arrays
+tweets_list = np.array(tweet)
+labels_list = np.array(label)
 
-# --- گام اول: تحلیل احساسات با VADER ---
-sentiment_analyzer = SentimentIntensityAnalyzer()
+# 3) Perform sentiment analysis with VADER using tweets_list
+sia = SentimentIntensityAnalyzer()
 sentiment_labels = []
-
-for tweet_text in tweets_data:
-    sentiment_score = sentiment_analyzer.polarity_scores(tweet_text)
-    
-    # تقسیم‌بندی احساسات بر اساس مقدار compound
-    if sentiment_score['compound'] >= 0.05:
-        sentiment = 1  # احساس مثبت
-    elif sentiment_score['compound'] <= -0.05:
-        sentiment = 0  # احساس منفی
+for txt in tweets_list:
+    score = sia.polarity_scores(txt)['compound']
+    if score >= 0.05:
+        sentiment_labels.append(1)  # positive
+    elif score <= -0.05:
+        sentiment_labels.append(0)  # negative
     else:
-        sentiment = 2  # احساس خنثی
-    
-    sentiment_labels.append(sentiment)
+        sentiment_labels.append(2)  # neutral
+sent_onehot = to_categorical(np.array(sentiment_labels), num_classes=3)
 
-sentiment_labels = np.array(sentiment_labels)
+# 4) Tokenize with English BERT and extract inputs from tweets_list
+de_model = 'bert-base-uncased'
+tokenizer = AutoTokenizer.from_pretrained(de_model)
+bert_model = TFAutoModel.from_pretrained(de_model)
 
-# --- گام دوم: آماده‌سازی داده‌ها برای مدل ---
-tweets_tokenizer = Tokenizer()  # ایجاد توکنایزر برای توییت‌ها
-tweets_tokenizer.fit_on_texts(tweets_data)
-tweets_sequences = tweets_tokenizer.texts_to_sequences(tweets_data)
-tweets_word_index = tweets_tokenizer.word_index
+encodings = tokenizer(
+    tweets_list.tolist(),
+    padding=True,
+    truncation=True,
+    return_tensors='tf'
+)
+input_ids = encodings['input_ids'].numpy()
+attention_mask = encodings['attention_mask'].numpy()
 
-# کدگذاری برچسب‌ها
-labels_encoder = LabelEncoder()  # ایجاد LabelEncoder برای برچسب‌ها
-labels_encoder.fit(labels_data)
-encoded_labels = labels_encoder.transform(labels_data)
-encoded_labels = to_categorical(np.asarray(encoded_labels))
+# 5) Encode labels_list and one-hot
+le = LabelEncoder()
+le.fit(labels_list)
+y_int = le.transform(labels_list)
+y_onehot = to_categorical(y_int)
+num_classes = y_onehot.shape[1]
 
-# محاسبه طول بیشترین دنباله
-MAX_SEQUENCE_LENGTH = max([len(tweet.split()) for tweet in tweets_data])  # طول بیشترین دنباله
-tweets_data_padded = pad_sequences(tweets_sequences, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
-
-# --- گام سوم: آماده‌سازی داده‌های احساسات ---
-sentiment_labels_categorical = to_categorical(sentiment_labels, num_classes=3)
-
-# --- گام چهارم: تقسیم داده‌ها به سه قسمت ---
-# تقسیم داده‌ها به دو بخش: آموزش + اعتبارسنجی و تست (80% آموزش + اعتبارسنجی و 20% تست)
-tweets_train_val, tweets_test, labels_train_val, labels_test = train_test_split(
-    tweets_data_padded, encoded_labels, test_size=0.2, random_state=42
+# 6) Split data into train/validation/test
+X_ids_temp, X_ids_test, X_mask_temp, X_mask_test, s_temp, s_test, y_temp, y_test = train_test_split(
+    input_ids, attention_mask, sent_onehot, y_onehot,
+    test_size=0.2, random_state=42
+)
+X_ids_train, X_ids_val, X_mask_train, X_mask_val, s_train, s_val, y_train, y_val = train_test_split(
+    X_ids_temp, X_mask_temp, s_temp, y_temp,
+    test_size=0.125, random_state=42
 )
 
-# تقسیم داده‌های آموزش به دو بخش: آموزش و اعتبارسنجی (70% آموزش و 10% اعتبارسنجی از کل داده‌ها)
-tweets_train, tweets_val, labels_train, labels_val = train_test_split(
-    tweets_train_val, labels_train_val, test_size=0.125, random_state=42  # 0.125 * 0.8 = 0.1 (10% اعتبارسنجی)
+# 7) Build combined model: BERT outputs + sentiment features
+input_ids_layer = Input(shape=(None,), dtype=tf.int32, name='input_ids')
+attention_mask_layer = Input(shape=(None,), dtype=tf.int32, name='attention_mask')
+
+bert_outputs = bert_model(input_ids=input_ids_layer, attention_mask=attention_mask_layer)
+pooled_output = bert_outputs.pooler_output
+pooled_dropout = Dropout(0.3)(pooled_output)
+
+sent_input = Input(shape=(3,), name='sentiment_input')
+combined = Concatenate()([pooled_dropout, sent_input])
+
+dense1 = Dense(64, activation='relu')(combined)
+output_layer = Dense(num_classes, activation='softmax')(dense1)
+
+model = Model(inputs=[input_ids_layer, attention_mask_layer, sent_input], outputs=output_layer)
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
 )
+model.summary()
 
-# --- گام پنجم: آماده‌سازی مدل ---
-input_layer = Input(shape=(MAX_SEQUENCE_LENGTH,))
-embedding_layer = Embedding(len(tweets_word_index) + 1, 100, input_length=MAX_SEQUENCE_LENGTH)(input_layer)
-lstm_layer = LSTM(100, return_sequences=False)(embedding_layer)
-dropout_layer = Dropout(0.5)(lstm_layer)
-
-# اصلاح: تبدیل داده‌ها به شکل (batch_size, sequence_length, 1)
-reshape_layer = Reshape((MAX_SEQUENCE_LENGTH, 1))(dropout_layer)
-
-# اعمال کانولوشن روی داده‌های ورودی با ابعاد درست
-conv_layer = Conv1D(128, 3, activation='relu')(reshape_layer)
-maxpool_layer = MaxPooling1D()(conv_layer)
-dense_layer = Dense(64, activation='relu')(maxpool_layer)
-output_layer = Dense(3, activation='softmax')(dense_layer)  # Output layer for 3-class classification
-
-rumor_detection_model = Model(inputs=input_layer, outputs=output_layer)
-
-# کامپایل مدل
-opt = Adam(learning_rate=0.002)
-rumor_detection_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
-
-# --- گام ششم: آموزش مدل با داده‌های تقسیم‌شده ---
+# 8) Train with callbacks
 callbacks = [
-    keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    keras.callbacks.ModelCheckpoint('rumor_detection_model.h5', monitor='val_accuracy', save_best_only=True)
+    EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    ModelCheckpoint('rumor_bert_en_best.h5', monitor='val_accuracy', save_best_only=True),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-7)
 ]
 
-rumor_detection_model.fit(
-    [tweets_train, sentiment_labels_categorical[:len(tweets_train)]], labels_train,
-    validation_data=([tweets_val, sentiment_labels_categorical[len(tweets_train):len(tweets_train)+len(tweets_val)]], labels_val),
-    epochs=10,
-    batch_size=32,
+history = model.fit(
+    [X_ids_train, X_mask_train, s_train], y_train,
+    validation_data=([X_ids_val, X_mask_val, s_val], y_val),
+    epochs=15,
+    batch_size=16,
     callbacks=callbacks
 )
 
-# --- گام هفتم: ارزیابی مدل با داده‌های تست ---
-loss, accuracy = rumor_detection_model.evaluate([tweets_test, sentiment_labels_categorical[len(tweets_train_val):]], labels_test, verbose=0)
-print(f"✅ مدل شایعه: Accuracy: {accuracy * 100:.2f}% | Loss: {loss:.4f}")
+# 9) Final evaluation
+loss, accuracy = model.evaluate([X_ids_test, X_mask_test, s_test], y_test)
+print(f'Test Accuracy: {accuracy*100:.2f}% | Loss: {loss:.4f}')
 
-y_pred_probs = rumor_detection_model.predict([tweets_test, sentiment_labels_categorical[len(tweets_train_val):]] )
-y_pred = np.argmax(y_pred_probs, axis=1)
+# 10) Plot training history
+plt.figure()
+plt.plot(history.history['accuracy'], label='train_acc')
+plt.plot(history.history['val_accuracy'], label='val_acc')
+plt.legend()
+plt.title('Training vs. Validation Accuracy')
 
-# گزارش‌ها
-print("📌 Classification Report:")
-print(classification_report(labels_test.argmax(axis=1), y_pred, digits=4))
-
-# ماتریس سردرگمی
-cm = confusion_matrix(labels_test.argmax(axis=1), y_pred)
-plt.figure(figsize=(6, 4))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-plt.title("Confusion Matrix - Rumor Detection Model")
-plt.xlabel("Predicted")
-plt.ylabel("True")
+plt.figure()
+plt.plot(history.history['loss'], label='train_loss')
+plt.plot(history.history['val_loss'], label='val_loss')
+plt.legend()
+plt.title('Training vs. Validation Loss')
 plt.show()
+
 
 
 
