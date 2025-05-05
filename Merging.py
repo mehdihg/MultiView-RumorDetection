@@ -567,127 +567,293 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# فرض می‌کنیم که tweets و label شما به این صورت هستند
+
+
 import numpy as np
 import pandas as pd
 import nltk
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from keras.utils import to_categorical
 from sklearn.model_selection import train_test_split
-from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate, Conv1D, BatchNormalization, MaxPooling1D, Bidirectional, LSTM, Attention, GlobalAveragePooling1D
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from transformers import AutoTokenizer, TFAutoModel
 import tensorflow as tf
-import matplotlib.pyplot as plt
 
-# 1) Download VADER lexicon for English sentiment analysis
+# 1) Download VADER lexicon
 nltk.download('vader_lexicon')
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# 2) Load your English Twitter dataset into numpy arrays
-# Assume `tweet` and `label` are predefined Python lists/arrays
+# --- TEXT & SENTIMENT BRANCH ---
+# Assume tweets_list (list of str) and original labels label_list are defined
 tweets_list = np.array(tweet)
-labels_list = np.array(label)
+label_list = np.array(label)
 
-# 3) Perform sentiment analysis with VADER using tweets_list
+# Sentiment via VADER
 sia = SentimentIntensityAnalyzer()
-sentiment_labels = []
+sent_labels = []
 for txt in tweets_list:
-    score = sia.polarity_scores(txt)['compound']
-    if score >= 0.05:
-        sentiment_labels.append(1)  # positive
-    elif score <= -0.05:
-        sentiment_labels.append(0)  # negative
+    sc = sia.polarity_scores(txt)['compound']
+    if sc >= 0.05:
+        sent_labels.append(1)
+    elif sc <= -0.05:
+        sent_labels.append(0)
     else:
-        sentiment_labels.append(2)  # neutral
-sent_onehot = to_categorical(np.array(sentiment_labels), num_classes=3)
+        sent_labels.append(2)
+sent_onehot = to_categorical(sent_labels, num_classes=3)
 
-# 4) Tokenize with English BERT and extract inputs from tweets_list
-de_model = 'bert-base-uncased'
-tokenizer = AutoTokenizer.from_pretrained(de_model)
-bert_model = TFAutoModel.from_pretrained(de_model)
+# BERT tokenization
+bert_name = 'bert-base-uncased'
+tokenizer = AutoTokenizer.from_pretrained(bert_name)
+bert_model = TFAutoModel.from_pretrained(bert_name)
+enc = tokenizer(tweets_list.tolist(), padding=True, truncation=True, return_tensors='tf')
+ids = enc['input_ids'].numpy()
+masks = enc['attention_mask'].numpy()
 
-encodings = tokenizer(
-    tweets_list.tolist(),
-    padding=True,
-    truncation=True,
-    return_tensors='tf'
-)
-input_ids = encodings['input_ids'].numpy()
-attention_mask = encodings['attention_mask'].numpy()
+# Label encoding target
+le_text = LabelEncoder(); y_int = le_text.fit_transform(label_list)
+y_text = to_categorical(y_int)
+num_classes = y_text.shape[1]
 
-# 5) Encode labels_list and one-hot
-le = LabelEncoder()
-le.fit(labels_list)
-y_int = le.transform(labels_list)
-y_onehot = to_categorical(y_int)
-num_classes = y_onehot.shape[1]
+# --- GRAPH STRUCTURE BRANCH ---
+# Load structural data
+df = pd.read_excel('/content/MultiView-RumorDetection/graph-train.xlsx', header=1)
+df.columns = df.columns.str.strip()
+# Features: degree, degreecent, closeness_centrality, pagerank
+Xg = df[['degree','degreecent','closeness_centrality','pagerank']].values.astype('float32')
+# Standard scale
+scaler = StandardScaler(); Xg = scaler.fit_transform(Xg)
+# Expand dims for Conv1D
+Xg = np.expand_dims(Xg, axis=2)
+# Graph labels (choose same target as text?)
+yg_raw = df.values[:,2]
+le_g = LabelEncoder(); yg_int = le_g.fit_transform(yg_raw)
+# Assuming binary for graph branch
+yg = to_categorical(yg_int)
 
-# 6) Split data into train/validation/test
-X_ids_temp, X_ids_test, X_mask_temp, X_mask_test, s_temp, s_test, y_temp, y_test = train_test_split(
-    input_ids, attention_mask, sent_onehot, y_onehot,
-    test_size=0.2, random_state=42
-)
-X_ids_train, X_ids_val, X_mask_train, X_mask_val, s_train, s_val, y_train, y_val = train_test_split(
-    X_ids_temp, X_mask_temp, s_temp, y_temp,
-    test_size=0.125, random_state=42
-)
+# --- SPLIT ALL DATA ---
+# Align sizes: tweets_list and df must be same order/size or matched externally
+# Here assume same length N
+Xti, Xtm, Ss, Yt, Xg_i, Yg = ids, masks, sent_onehot, y_text, Xg, yg
+X_ids_temp, X_ids_test, X_mask_temp, X_mask_test, s_temp, s_test, Xg_temp, Xg_test, y_temp, y_test = \
+    train_test_split(Xti, Xtm, Ss, Xg_i, Yt, test_size=0.2, random_state=42)
+X_ids_train, X_ids_val, X_mask_train, X_mask_val, s_train, s_val, Xg_train, Xg_val, y_train, y_val = \
+    train_test_split(X_ids_temp, X_mask_temp, s_temp, Xg_temp, y_temp, test_size=0.125, random_state=42)
 
-# 7) Build combined model: BERT outputs + sentiment features
+# --- MODEL ARCHITECTURE ---
+# Text inputs
 input_ids_layer = Input(shape=(None,), dtype=tf.int32, name='input_ids')
 attention_mask_layer = Input(shape=(None,), dtype=tf.int32, name='attention_mask')
-
-bert_outputs = bert_model(input_ids=input_ids_layer, attention_mask=attention_mask_layer)
-pooled_output = bert_outputs.pooler_output
-pooled_dropout = Dropout(0.3)(pooled_output)
-
+# BERT encoding
+bert_out = bert_model(input_ids=input_ids_layer, attention_mask=attention_mask_layer)
+text_feat = Dropout(0.3)(bert_out.pooler_output)
+# Sentiment input
 sent_input = Input(shape=(3,), name='sentiment_input')
-combined = Concatenate()([pooled_dropout, sent_input])
+# Graph input branch
+graph_input = Input(shape=(Xg.shape[1],1), name='graph_input')
+x = Conv1D(128, 3, activation='relu', padding='same')(graph_input)
+x = BatchNormalization()(x)
+x = MaxPooling1D(2)(x)
+x = Conv1D(64, 3, activation='relu', padding='same')(x)
+x = BatchNormalization()(x)
+x = Bidirectional(LSTM(64, return_sequences=True))(x)
+x = Attention()([x, x])
+x = GlobalAveragePooling1D()(x)
+x = Dropout(0.5)(x)
+graph_feat = Dense(64, activation='relu')(x)
 
-dense1 = Dense(64, activation='relu')(combined)
-output_layer = Dense(num_classes, activation='softmax')(dense1)
+# Combine all
+combined = Concatenate()([text_feat, sent_input, graph_feat])
+x = Dense(64, activation='relu')(combined)
+x = Dropout(0.3)(x)
+output = Dense(num_classes, activation='softmax')(x)
+model = Model(inputs=[input_ids_layer, attention_mask_layer, sent_input, graph_input], outputs=output)
 
-model = Model(inputs=[input_ids_layer, attention_mask_layer, sent_input], outputs=output_layer)
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
+model.compile(optimizer=tf.keras.optimizers.Adam(2e-5),
+              loss='categorical_crossentropy', metrics=['accuracy'])
 model.summary()
 
-# 8) Train with callbacks
+# --- TRAINING ---
 callbacks = [
-    EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    ModelCheckpoint('rumor_bert_en_best.h5', monitor='val_accuracy', save_best_only=True),
-    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-7)
+    EarlyStopping('val_loss', patience=5, restore_best_weights=True),
+    ModelCheckpoint('multi_view_best.h5', monitor='val_accuracy', save_best_only=True),
+    ReduceLROnPlateau('val_loss', factor=0.5, patience=2, min_lr=1e-7)
 ]
-
 history = model.fit(
-    [X_ids_train, X_mask_train, s_train], y_train,
-    validation_data=([X_ids_val, X_mask_val, s_val], y_val),
-    epochs=15,
-    batch_size=16,
-    callbacks=callbacks
+    [X_ids_train, X_mask_train, s_train, Xg_train], y_train,
+    validation_data=([X_ids_val, X_mask_val, s_val, Xg_val], y_val),
+    epochs=15, batch_size=16, callbacks=callbacks
 )
 
-# 9) Final evaluation
-loss, accuracy = model.evaluate([X_ids_test, X_mask_test, s_test], y_test)
-print(f'Test Accuracy: {accuracy*100:.2f}% | Loss: {loss:.4f}')
+# --- EVALUATION ---
+loss, acc = model.evaluate([X_ids_test, X_mask_test, s_test, Xg_test], y_test)
+print(f"Test Accuracy: {acc:.2%} | Loss: {loss:.4f}")
 
-# 10) Plot training history
-plt.figure()
-plt.plot(history.history['accuracy'], label='train_acc')
-plt.plot(history.history['val_accuracy'], label='val_acc')
-plt.legend()
-plt.title('Training vs. Validation Accuracy')
 
-plt.figure()
-plt.plot(history.history['loss'], label='train_loss')
-plt.plot(history.history['val_loss'], label='val_loss')
-plt.legend()
-plt.title('Training vs. Validation Loss')
-plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# فرض می‌کنیم که tweets و label شما به این صورت هستند
+# import numpy as np
+# import pandas as pd
+# import nltk
+# from sklearn.preprocessing import LabelEncoder
+# from keras.utils import to_categorical
+# from sklearn.model_selection import train_test_split
+# from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+# from transformers import AutoTokenizer, TFAutoModel
+# import tensorflow as tf
+# import matplotlib.pyplot as plt
+
+# # 1) Download VADER lexicon for English sentiment analysis
+# nltk.download('vader_lexicon')
+# from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+# # 2) Load your English Twitter dataset into numpy arrays
+# # Assume `tweet` and `label` are predefined Python lists/arrays
+# tweets_list = np.array(tweet)
+# labels_list = np.array(label)
+
+# # 3) Perform sentiment analysis with VADER using tweets_list
+# sia = SentimentIntensityAnalyzer()
+# sentiment_labels = []
+# for txt in tweets_list:
+#     score = sia.polarity_scores(txt)['compound']
+#     if score >= 0.05:
+#         sentiment_labels.append(1)  # positive
+#     elif score <= -0.05:
+#         sentiment_labels.append(0)  # negative
+#     else:
+#         sentiment_labels.append(2)  # neutral
+# sent_onehot = to_categorical(np.array(sentiment_labels), num_classes=3)
+
+# # 4) Tokenize with English BERT and extract inputs from tweets_list
+# de_model = 'bert-base-uncased'
+# tokenizer = AutoTokenizer.from_pretrained(de_model)
+# bert_model = TFAutoModel.from_pretrained(de_model)
+
+# encodings = tokenizer(
+#     tweets_list.tolist(),
+#     padding=True,
+#     truncation=True,
+#     return_tensors='tf'
+# )
+# input_ids = encodings['input_ids'].numpy()
+# attention_mask = encodings['attention_mask'].numpy()
+
+# # 5) Encode labels_list and one-hot
+# le = LabelEncoder()
+# le.fit(labels_list)
+# y_int = le.transform(labels_list)
+# y_onehot = to_categorical(y_int)
+# num_classes = y_onehot.shape[1]
+
+# # 6) Split data into train/validation/test
+# X_ids_temp, X_ids_test, X_mask_temp, X_mask_test, s_temp, s_test, y_temp, y_test = train_test_split(
+#     input_ids, attention_mask, sent_onehot, y_onehot,
+#     test_size=0.2, random_state=42
+# )
+# X_ids_train, X_ids_val, X_mask_train, X_mask_val, s_train, s_val, y_train, y_val = train_test_split(
+#     X_ids_temp, X_mask_temp, s_temp, y_temp,
+#     test_size=0.125, random_state=42
+# )
+
+# # 7) Build combined model: BERT outputs + sentiment features
+# input_ids_layer = Input(shape=(None,), dtype=tf.int32, name='input_ids')
+# attention_mask_layer = Input(shape=(None,), dtype=tf.int32, name='attention_mask')
+
+# bert_outputs = bert_model(input_ids=input_ids_layer, attention_mask=attention_mask_layer)
+# pooled_output = bert_outputs.pooler_output
+# pooled_dropout = Dropout(0.3)(pooled_output)
+
+# sent_input = Input(shape=(3,), name='sentiment_input')
+# combined = Concatenate()([pooled_dropout, sent_input])
+
+# dense1 = Dense(64, activation='relu')(combined)
+# output_layer = Dense(num_classes, activation='softmax')(dense1)
+
+# model = Model(inputs=[input_ids_layer, attention_mask_layer, sent_input], outputs=output_layer)
+# model.compile(
+#     optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5),
+#     loss='categorical_crossentropy',
+#     metrics=['accuracy']
+# )
+# model.summary()
+
+# # 8) Train with callbacks
+# callbacks = [
+#     EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+#     ModelCheckpoint('rumor_bert_en_best.h5', monitor='val_accuracy', save_best_only=True),
+#     ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-7)
+# ]
+
+# history = model.fit(
+#     [X_ids_train, X_mask_train, s_train], y_train,
+#     validation_data=([X_ids_val, X_mask_val, s_val], y_val),
+#     epochs=15,
+#     batch_size=16,
+#     callbacks=callbacks
+# )
+
+# # 9) Final evaluation
+# loss, accuracy = model.evaluate([X_ids_test, X_mask_test, s_test], y_test)
+# print(f'Test Accuracy: {accuracy*100:.2f}% | Loss: {loss:.4f}')
+
+# # 10) Plot training history
+# plt.figure()
+# plt.plot(history.history['accuracy'], label='train_acc')
+# plt.plot(history.history['val_accuracy'], label='val_acc')
+# plt.legend()
+# plt.title('Training vs. Validation Accuracy')
+
+# plt.figure()
+# plt.plot(history.history['loss'], label='train_loss')
+# plt.plot(history.history['val_loss'], label='val_loss')
+# plt.legend()
+# plt.title('Training vs. Validation Loss')
+# plt.show()
 
 
 
@@ -723,144 +889,144 @@ from tensorflow.keras.models import Model, Sequential
 
 from transformers import TFBertModel, BertTokenizer, create_optimizer
 
-import tensorflow as tf
-from transformers import TFBertModel, BertTokenizer
-from tensorflow.keras.layers import Input, Conv1D, GlobalMaxPooling1D, Dense, Dropout, concatenate, LayerNormalization, MultiHeadAttention
-from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
+# import tensorflow as tf
+# from transformers import TFBertModel, BertTokenizer
+# from tensorflow.keras.layers import Input, Conv1D, GlobalMaxPooling1D, Dense, Dropout, concatenate, LayerNormalization, MultiHeadAttention
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+# from tensorflow.keras.optimizers import Adam
 
 
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve
-import matplotlib.pyplot as plt
+# from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+# import seaborn as sns
+# import matplotlib.pyplot as plt
+# from sklearn.metrics import roc_curve, auc, precision_recall_curve
+# import matplotlib.pyplot as plt
 
-# --- 1. آماده‌سازی ورودی ---
-MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH    # یا مقدار قبلی شما
+# # --- 1. آماده‌سازی ورودی ---
+# MAX_SEQUENCE_LENGTH = MAX_SEQUENCE_LENGTH    # یا مقدار قبلی شما
 
-bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-encoded = bert_tokenizer(
-    tweets.tolist(),
-    max_length=MAX_SEQUENCE_LENGTH,
-    padding='max_length',
-    truncation=True,
-    return_tensors='tf'
-)
-input_ids = encoded['input_ids']
-attention_mask = encoded['attention_mask']
+# bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+# encoded = bert_tokenizer(
+#     tweets.tolist(),
+#     max_length=MAX_SEQUENCE_LENGTH,
+#     padding='max_length',
+#     truncation=True,
+#     return_tensors='tf'
+# )
+# input_ids = encoded['input_ids']
+# attention_mask = encoded['attention_mask']
 
-# --- 2. ساخت مدل ---
-ids_in  = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
-mask_in = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
+# # --- 2. ساخت مدل ---
+# ids_in  = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='input_ids')
+# mask_in = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype=tf.int32, name='attention_mask')
 
-# بارگذاری و فعال‌سازی BERT
-bert_encoder = TFBertModel.from_pretrained('bert-base-uncased')
-bert_encoder.trainable = True
+# # بارگذاری و فعال‌سازی BERT
+# bert_encoder = TFBertModel.from_pretrained('bert-base-uncased')
+# bert_encoder.trainable = True
 
-bert_out = bert_encoder(ids_in, attention_mask=mask_in)
-sequence_output = bert_out.last_hidden_state  # (batch_size, seq_len, hidden_size)
+# bert_out = bert_encoder(ids_in, attention_mask=mask_in)
+# sequence_output = bert_out.last_hidden_state  # (batch_size, seq_len, hidden_size)
 
-# CNN با دو کرنل
-conv3 = Conv1D(128, 3, activation='relu', padding='same')(sequence_output)
-conv5 = Conv1D(128, 5, activation='relu', padding='same')(sequence_output)
-cnn_concat = concatenate([conv3, conv5], axis=-1)  # (batch, seq_len, 256)
+# # CNN با دو کرنل
+# conv3 = Conv1D(128, 3, activation='relu', padding='same')(sequence_output)
+# conv5 = Conv1D(128, 5, activation='relu', padding='same')(sequence_output)
+# cnn_concat = concatenate([conv3, conv5], axis=-1)  # (batch, seq_len, 256)
 
-# Multi-Head Attention (num_heads=4, key_dim=64)
-mha = MultiHeadAttention(num_heads=4, key_dim=64)(cnn_concat, cnn_concat)
-mha_norm = LayerNormalization()(mha)
+# # Multi-Head Attention (num_heads=4, key_dim=64)
+# mha = MultiHeadAttention(num_heads=4, key_dim=64)(cnn_concat, cnn_concat)
+# mha_norm = LayerNormalization()(mha)
 
-# Pooling + Dense layers
-x = GlobalMaxPooling1D()(mha_norm)
-x = Dropout(0.3)(x)
-x = Dense(64, activation='relu')(x)
-x = Dropout(0.3)(x)
+# # Pooling + Dense layers
+# x = GlobalMaxPooling1D()(mha_norm)
+# x = Dropout(0.3)(x)
+# x = Dense(64, activation='relu')(x)
+# x = Dropout(0.3)(x)
 
-# خروجی
-outputs = Dense(2, activation='softmax', name='context_output')(x)
+# # خروجی
+# outputs = Dense(2, activation='softmax', name='context_output')(x)
 
-# مدل نهایی
-contexmodel = Model(inputs=[ids_in, mask_in], outputs=outputs, name='bert_cnn_mha')
+# # مدل نهایی
+# contexmodel = Model(inputs=[ids_in, mask_in], outputs=outputs, name='bert_cnn_mha')
 
-# --- 3. کامپایل ---
-contexmodel.compile(
-    optimizer=Adam(learning_rate=3e-5),
-    loss='binary_crossentropy',
-    metrics=['accuracy']
-)
+# # --- 3. کامپایل ---
+# contexmodel.compile(
+#     optimizer=Adam(learning_rate=3e-5),
+#     loss='binary_crossentropy',
+#     metrics=['accuracy']
+# )
 
-# --- 4. آموزش ---
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
-    ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5',
-                    monitor='val_accuracy', save_best_only=True)
-]
+# # --- 4. آموزش ---
+# callbacks = [
+#     EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
+#     ModelCheckpoint('MultiView-RumorDetection/best_modeln8000.hdf5',
+#                     monitor='val_accuracy', save_best_only=True)
+# ]
 
-contexmodel.fit(
-    [input_ids[:803], attention_mask[:803]],
-    labels[:803],
-    validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
-    batch_size=8,
-    epochs=30,
-    callbacks=callbacks
-)
+# contexmodel.fit(
+#     [input_ids[:803], attention_mask[:803]],
+#     labels[:803],
+#     validation_data=([input_ids[803:917], attention_mask[803:917]], labels[803:917]),
+#     batch_size=8,
+#     epochs=30,
+#     callbacks=callbacks
+# )
 
-# --- 5. ارزیابی مدل ---
-loss, accuracy = contexmodel.evaluate(
-    [input_ids[917:], attention_mask[917:]], labels[917:], verbose=0
-)
-print(f"\n✅ مدل روی داده‌ی تست:\n  Accuracy: {accuracy * 100:.2f}%\n  Loss: {loss:.4f}")
+# # --- 5. ارزیابی مدل ---
+# loss, accuracy = contexmodel.evaluate(
+#     [input_ids[917:], attention_mask[917:]], labels[917:], verbose=0
+# )
+# print(f"\n✅ مدل روی داده‌ی تست:\n  Accuracy: {accuracy * 100:.2f}%\n  Loss: {loss:.4f}")
 
-y_true = labels[917:].argmax(axis=1)
-y_pred_probs = contexmodel.predict([input_ids[917:], attention_mask[917:]])
-y_pred = y_pred_probs.argmax(axis=1)
+# y_true = labels[917:].argmax(axis=1)
+# y_pred_probs = contexmodel.predict([input_ids[917:], attention_mask[917:]])
+# y_pred = y_pred_probs.argmax(axis=1)
 
-# گزارش‌ها
-print("📌 Classification Report:")
-print(classification_report(y_true, y_pred, digits=4))
+# # گزارش‌ها
+# print("📌 Classification Report:")
+# print(classification_report(y_true, y_pred, digits=4))
 
-# ماتریس سردرگمی
-cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(6, 4))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-plt.title("Confusion Matrix - BERT-CNN-MHA")
-plt.xlabel("Predicted")
-plt.ylabel("True")
-plt.show()
+# # ماتریس سردرگمی
+# cm = confusion_matrix(y_true, y_pred)
+# plt.figure(figsize=(6, 4))
+# sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+# plt.title("Confusion Matrix - BERT-CNN-MHA")
+# plt.xlabel("Predicted")
+# plt.ylabel("True")
+# plt.show()
 
-# AUC (فقط برای binary)
-if y_pred_probs.shape[1] == 2:
-    roc_auc_val = roc_auc_score(y_true, y_pred_probs[:, 1])
-    print(f"🔵 ROC AUC: {roc_auc_val:.4f}")
+# # AUC (فقط برای binary)
+# if y_pred_probs.shape[1] == 2:
+#     roc_auc_val = roc_auc_score(y_true, y_pred_probs[:, 1])
+#     print(f"🔵 ROC AUC: {roc_auc_val:.4f}")
 
 
 
-# فقط برای binary classification
-fpr, tpr, _ = roc_curve(y_true, y_pred_probs[:, 1])
-roc_auc = auc(fpr, tpr)
+# # فقط برای binary classification
+# fpr, tpr, _ = roc_curve(y_true, y_pred_probs[:, 1])
+# roc_auc = auc(fpr, tpr)
 
-precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:, 1])
+# precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:, 1])
 
-plt.figure(figsize=(12, 5))
+# plt.figure(figsize=(12, 5))
 
-plt.subplot(1, 2, 1)
-plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.4f})")
-plt.plot([0, 1], [0, 1], 'k--')
-plt.title("ROC Curve - BERT-CNN-MHA")
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.legend()
+# plt.subplot(1, 2, 1)
+# plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.4f})")
+# plt.plot([0, 1], [0, 1], 'k--')
+# plt.title("ROC Curve - BERT-CNN-MHA")
+# plt.xlabel("False Positive Rate")
+# plt.ylabel("True Positive Rate")
+# plt.legend()
 
-plt.subplot(1, 2, 2)
-plt.plot(recall, precision, label="Precision-Recall Curve")
-plt.title("Precision-Recall Curve - BERT-CNN-MHA")
-plt.xlabel("Recall")
-plt.ylabel("Precision")
-plt.legend()
+# plt.subplot(1, 2, 2)
+# plt.plot(recall, precision, label="Precision-Recall Curve")
+# plt.title("Precision-Recall Curve - BERT-CNN-MHA")
+# plt.xlabel("Recall")
+# plt.ylabel("Precision")
+# plt.legend()
 
-plt.tight_layout()
-plt.show()
+# plt.tight_layout()
+# plt.show()
 
 
 
@@ -890,145 +1056,143 @@ from tensorflow.keras.utils import to_categorical
 
 
 
-import pandas as pd
-import numpy as np
-from sklearn import preprocessing
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv1D, BatchNormalization, MaxPooling1D, LSTM, Dense, Dropout, Bidirectional, Attention, GlobalAveragePooling1D
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.optimizers import Adam
+# import pandas as pd
+# import numpy as np
+# from sklearn import preprocessing
+# from sklearn.preprocessing import LabelEncoder, StandardScaler
+# from tensorflow.keras.utils import to_categorical
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.layers import Input, Conv1D, BatchNormalization, MaxPooling1D, LSTM, Dense, Dropout, Bidirectional, Attention, GlobalAveragePooling1D
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+# from tensorflow.keras.optimizers import Adam
 
-# --- Load & preprocess data ---
-df_raw = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=None)
+# # --- Load & preprocess data ---
+# df_raw = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=None)
 
-# بررسی اولین چند سطر برای بررسی محتوای آن‌ها
-print(df_raw.head(3))
+# # بررسی اولین چند سطر برای بررسی محتوای آن‌ها
+# print(df_raw.head(3))
 
-# تنظیم header بر اساس سطر دوم (index=1)
-df = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=1)
+# # تنظیم header بر اساس سطر دوم (index=1)
+# df = pd.read_excel("/content/MultiView-RumorDetection/graph-train.xlsx", header=1)
 
-# تمیز کردن نام ستون‌ها (در صورتی که شامل فضاهای اضافی باشد)
-df.columns = df.columns.str.strip()
+# # تمیز کردن نام ستون‌ها (در صورتی که شامل فضاهای اضافی باشد)
+# df.columns = df.columns.str.strip()
 
-# بررسی ستون‌ها
-print(df.columns.tolist())
+# # بررسی ستون‌ها
+# print(df.columns.tolist())
 
-# استخراج داده‌ها
-idd = df.values[:, 0]  # فرض می‌کنیم ستون اول (index 0) شناسه است
-X = df[['degree', 'degreecent', 'closeness_centrality', 'pagerank']].astype('float32').values
+# # استخراج داده‌ها
+# idd = df.values[:, 0]  # فرض می‌کنیم ستون اول (index 0) شناسه است
+# X = df[['degree', 'degreecent', 'closeness_centrality', 'pagerank']].astype('float32').values
 
-# Scaling (standardization)
-scaler = StandardScaler()
-X = scaler.fit_transform(X)
+# # Scaling (standardization)
+# scaler = StandardScaler()
+# X = scaler.fit_transform(X)
 
-# Labels
-yy = df.values[:, 2]
-le = LabelEncoder()
-y = le.fit_transform(yy)
-y = to_categorical(y)
+# # Labels
+# yy = df.values[:, 2]
+# le = LabelEncoder()
+# y = le.fit_transform(yy)
+# y = to_categorical(y)
 
-# Reshape inputs for Conv1D
-X = np.expand_dims(X, axis=2)
+# # Reshape inputs for Conv1D
+# X = np.expand_dims(X, axis=2)
 
-# Split
-X_train, X_val, X_test = X[0:803], X[803:917], X[917:]
-y_train, y_val, y_test = y[0:803], y[803:917], y[917:]
+# # Split
+# X_train, X_val, X_test = X[0:803], X[803:917], X[917:]
+# y_train, y_val, y_test = y[0:803], y[803:917], y[917:]
 
-# --- Model with Conv1D + BiLSTM + Attention ---
-input_layer = Input(shape=(X.shape[1], 1))
+# # --- Model with Conv1D + BiLSTM + Attention ---
+# input_layer = Input(shape=(X.shape[1], 1))
 
-x = Conv1D(128, kernel_size=3, activation='relu', padding='same')(input_layer)
-x = BatchNormalization()(x)
-x = MaxPooling1D(pool_size=2)(x)
+# x = Conv1D(128, kernel_size=3, activation='relu', padding='same')(input_layer)
+# x = BatchNormalization()(x)
+# x = MaxPooling1D(pool_size=2)(x)
 
-x = Conv1D(64, kernel_size=3, activation='relu', padding='same')(x)
-x = BatchNormalization()(x)
+# x = Conv1D(64, kernel_size=3, activation='relu', padding='same')(x)
+# x = BatchNormalization()(x)
 
-x = Bidirectional(LSTM(64, return_sequences=True))(x)
-x = Attention()([x, x])  # Self-attention
+# x = Bidirectional(LSTM(64, return_sequences=True))(x)
+# x = Attention()([x, x])  # Self-attention
 
-x = GlobalAveragePooling1D()(x)
-x = Dropout(0.5)(x)
-x = Dense(64, activation='relu')(x)
-x = Dropout(0.3)(x)
-output_layer = Dense(2, activation='softmax')(x)
+# x = GlobalAveragePooling1D()(x)
+# x = Dropout(0.5)(x)
+# x = Dense(64, activation='relu')(x)
+# x = Dropout(0.3)(x)
+# output_layer = Dense(2, activation='softmax')(x)
 
-Netmodel = Model(inputs=input_layer, outputs=output_layer)
+# Netmodel = Model(inputs=input_layer, outputs=output_layer)
 
 # Compile
-Netmodel.compile(
-    optimizer=Adam(learning_rate=1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
+# Netmodel.compile(
+#     optimizer=Adam(learning_rate=1e-4),
+#     loss='categorical_crossentropy',
+#     metrics=['accuracy']
+# )
 
-# Callbacks
-early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
-checkpoint = ModelCheckpoint("MultiView-RumorDetection/best_model_structtime_attn.hdf5", monitor='val_accuracy', save_best_only=True)
+# # Callbacks
+# early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+# checkpoint = ModelCheckpoint("MultiView-RumorDetection/best_model_structtime_attn.hdf5", monitor='val_accuracy', save_best_only=True)
 
-# Train
-Netmodel.fit(
-    X_train, y_train,
-    validation_data=(X_val, y_val),
-    batch_size=8,
-    epochs=150,
-    callbacks=[early_stopping, checkpoint]
-)
+# # Train
+# Netmodel.fit(
+#     X_train, y_train,
+#     validation_data=(X_val, y_val),
+#     batch_size=8,
+#     epochs=150,
+#     callbacks=[early_stopping, checkpoint]
+# )
 
-# Evaluate
-test_loss, test_accuracy = Netmodel.evaluate(X_test, y_test)
-print(f"✅ Test Accuracy: {test_accuracy:.4f}")
-
-
-y_true_net = y_test.argmax(axis=1)
-y_pred_net_probs = Netmodel.predict(X_test)
-y_pred_net = y_pred_net_probs.argmax(axis=1)
-
-print("📌 Classification Report - Structural-Time:")
-print(classification_report(y_true_net, y_pred_net, digits=4))
-
-cm_net = confusion_matrix(y_true_net, y_pred_net)
-plt.figure(figsize=(6, 4))
-sns.heatmap(cm_net, annot=True, fmt='d', cmap='Oranges')
-plt.title("Confusion Matrix - Structural-Time")
-plt.xlabel("Predicted")
-plt.ylabel("True")
-plt.show()
-
-if y_pred_net_probs.shape[1] == 2:
-    roc_auc_score_net = roc_auc_score(y_true_net, y_pred_net_probs[:, 1])
-    print(f"🔵 ROC AUC: {roc_auc_score_net:.4f}")
+# # Evaluate
+# test_loss, test_accuracy = Netmodel.evaluate(X_test, y_test)
+# print(f"✅ Test Accuracy: {test_accuracy:.4f}")
 
 
+# y_true_net = y_test.argmax(axis=1)
+# y_pred_net_probs = Netmodel.predict(X_test)
+# y_pred_net = y_pred_net_probs.argmax(axis=1)
 
-fpr_net, tpr_net, _ = roc_curve(y_true_net, y_pred_net_probs[:, 1])
-roc_auc_net = auc(fpr_net, tpr_net)
+# print("📌 Classification Report - Structural-Time:")
+# print(classification_report(y_true_net, y_pred_net, digits=4))
 
-precision_net, recall_net, _ = precision_recall_curve(y_true_net, y_pred_net_probs[:, 1])
+# cm_net = confusion_matrix(y_true_net, y_pred_net)
+# plt.figure(figsize=(6, 4))
+# sns.heatmap(cm_net, annot=True, fmt='d', cmap='Oranges')
+# plt.title("Confusion Matrix - Structural-Time")
+# plt.xlabel("Predicted")
+# plt.ylabel("True")
+# plt.show()
 
-plt.figure(figsize=(12, 5))
-
-plt.subplot(1, 2, 1)
-plt.plot(fpr_net, tpr_net, label=f"ROC Curve (AUC = {roc_auc_net:.4f})")
-plt.plot([0, 1], [0, 1], 'k--')
-plt.title("ROC Curve - Structural-Time")
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.legend()
-
-plt.subplot(1, 2, 2)
-plt.plot(recall_net, precision_net, label="Precision-Recall Curve")
-plt.title("Precision-Recall Curve - Structural-Time")
-plt.xlabel("Recall")
-plt.ylabel("Precision")
-plt.legend()
-
-plt.tight_layout()
-plt.show()
+# if y_pred_net_probs.shape[1] == 2:
+#     roc_auc_score_net = roc_auc_score(y_true_net, y_pred_net_probs[:, 1])
+#     print(f"🔵 ROC AUC: {roc_auc_score_net:.4f}")
 
 
+
+# fpr_net, tpr_net, _ = roc_curve(y_true_net, y_pred_net_probs[:, 1])
+# roc_auc_net = auc(fpr_net, tpr_net)
+
+# precision_net, recall_net, _ = precision_recall_curve(y_true_net, y_pred_net_probs[:, 1])
+
+# plt.figure(figsize=(12, 5))
+
+# plt.subplot(1, 2, 1)
+# plt.plot(fpr_net, tpr_net, label=f"ROC Curve (AUC = {roc_auc_net:.4f})")
+# plt.plot([0, 1], [0, 1], 'k--')
+# plt.title("ROC Curve - Structural-Time")
+# plt.xlabel("False Positive Rate")
+# plt.ylabel("True Positive Rate")
+# plt.legend()
+
+# plt.subplot(1, 2, 2)
+# plt.plot(recall_net, precision_net, label="Precision-Recall Curve")
+# plt.title("Precision-Recall Curve - Structural-Time")
+# plt.xlabel("Recall")
+# plt.ylabel("Precision")
+# plt.legend()
+
+# plt.tight_layout()
+# plt.show()
 
 
 
@@ -1036,190 +1200,310 @@ plt.show()
 
 
 
+# import numpy as np
+# import tensorflow as tf
+# from tensorflow.keras.layers import (
+#     Input, Dense, Dropout, Concatenate,
+#     Conv1D, BatchNormalization, MaxPooling1D,
+#     Bidirectional, LSTM, Attention, GlobalAveragePooling1D
+# )
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.optimizers import Adam
+# from transformers import AutoTokenizer, TFAutoModel
+# from nltk.sentiment.vader import SentimentIntensityAnalyzer
+# from tensorflow.keras.utils import to_categorical
+# from sklearn.preprocessing import LabelEncoder, StandardScaler
+# from sklearn.model_selection import train_test_split
+# import nltk
+
+# nltk.download('vader_lexicon')
+
+# --- 1) آماده‌سازی داده‌ها ---
+# tweets_list, labels_list  ← پیش‌فرضِ شما
+# X_struct  ← ماتریس ویژگی‌های ساختاری (degree, centrality, ...)
+# تمام تبدیل‌ها (scaler, one‐hot، split) را مثل قبل انجام دهید:
+
+# مثال:
+# s_onehot = one-hot از نتایج VADER (shape=(n,3))
+# input_ids, attention_mask = tokenization با BERT
+# X_struct = StandardScaler → reshape (n, num_feats, 1)
+# y_onehot   = طبقه‌بندی نهایی → one-hot
+# سپس:
+# X_ids_tr, X_ids_val, X_ids_te, \
+# X_mask_tr, X_mask_val, X_mask_te, \
+# s_tr,    s_val,    s_te, \
+# X_str_tr, X_str_val, X_str_te, \
+# y_tr,    y_val,    y_te = train_test_split(
+#     input_ids, attention_mask, s_onehot,
+#     X_struct, y_onehot,
+#     test_size=0.2, random_state=42
+# )
+# # (یا دو بار split برای جداکردن validation)
+
+# # --- 2) ساخت شاخه متن (Text branch) ---
+# bert_name = 'bert-base-uncased'
+# tokenizer = AutoTokenizer.from_pretrained(bert_name)
+# bert_model = TFAutoModel.from_pretrained(bert_name)
+
+# # ورودی‌های متن
+# in_ids  = Input(shape=(None,), dtype=tf.int32, name='input_ids')
+# in_mask = Input(shape=(None,), dtype=tf.int32, name='attention_mask')
+# in_sent = Input(shape=(3,),    dtype=tf.float32, name='sentiment_input')
+
+# # BERT + Dropout
+# bert_out = bert_model(input_ids=in_ids, attention_mask=in_mask).pooler_output
+# tx = Dropout(0.3)(bert_out)
+# # می‌توانید یک Dense اضافه کنید یا مستقیم 64
+# tx = Dense(64, activation='relu', name='text_feat')(tx)
+
+# # --- 3) ساخت شاخه ساختار/زمان (Structural-Time branch) ---
+# num_feats = X_struct.shape[1]  # مثلاً 4
+# in_str = Input(shape=(num_feats, 1), name='struct_input')
+
+# sx = Conv1D(128, 3, padding='same', activation='relu')(in_str)
+# sx = BatchNormalization()(sx)
+# sx = MaxPooling1D(2)(sx)
+
+# sx = Conv1D(64, 3, padding='same', activation='relu')(sx)
+# sx = BatchNormalization()(sx)
+
+# sx = Bidirectional(LSTM(64, return_sequences=True))(sx)
+# sx = Attention()([sx, sx])               # Self-attention
+# sx = GlobalAveragePooling1D()(sx)
+# sx = Dropout(0.5)(sx)
+# sx = Dense(64, activation='relu', name='struct_feat')(sx)
+
+# # --- 4) ترکیب دو شاخه + لایه‌های خروجی ---
+# combined = Concatenate(name='fusion')([tx, sx])
+# x = Dense(64, activation='relu')(combined)
+# x = Dropout(0.3)(x)
+
+# num_classes = y_onehot.shape[1]
+# out = Dense(num_classes, activation='softmax', name='output')(x)
+
+# # مدل نهایی
+# multi_view_model = Model(
+#     inputs=[in_ids, in_mask, in_sent, in_str],
+#     outputs=out,
+#     name='MultiView_RumorDetector'
+# )
+
+# multi_view_model.compile(
+#     optimizer=Adam(2e-5),
+#     loss='categorical_crossentropy',
+#     metrics=['accuracy']
+# )
+# multi_view_model.summary()
+
+# # --- 5) آموزش مدل ---
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+
+# callbacks = [
+#     EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+#     ModelCheckpoint('mv_rumor_best.h5', monitor='val_accuracy', save_best_only=True),
+#     ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-7)
+# ]
+
+# history = multi_view_model.fit(
+#     [X_ids_tr, X_mask_tr, s_tr, X_str_tr],
+#     y_tr,
+#     validation_data=([X_ids_val, X_mask_val, s_val, X_str_val], y_val),
+#     epochs=15,
+#     batch_size=16,
+#     callbacks=callbacks
+# )
+
+# # --- 6) ارزیابی نهایی ---
+# loss, acc = multi_view_model.evaluate(
+#     [X_ids_te, X_mask_te, s_te, X_str_te],
+#     y_te
+# )
+# print(f"Test Acc: {acc*100:.2f}% | Loss: {loss:.4f}")
 
 
 
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Input, Dense, Dropout, Concatenate, Lambda, Add
-)
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    roc_curve,
-    precision_recall_curve,
-    auc
-)
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-# ---------------- 0. آماده‌سازی مدل‌های پیش‌آموزش‌دیده ----------------
-# (در صورت نیاز لایه‌های آنها را فریز کنید)
-for layer in contexmodel.layers:
-    layer.trainable = False
-for layer in Netmodel.layers:
-    layer.trainable = False
+# import numpy as np
+# import tensorflow as tf
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.layers import (
+#     Input, Dense, Dropout, Concatenate, Lambda, Add
+# )
+# from tensorflow.keras.optimizers import Adam
+# from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+# from sklearn.metrics import (
+#     classification_report,
+#     confusion_matrix,
+#     roc_auc_score,
+#     roc_curve,
+#     precision_recall_curve,
+#     auc
+# )
+# import matplotlib.pyplot as plt
+# import seaborn as sns
 
-# ---------------- 1. یافتن و ساخت مدل‌های استخراج ویژگی ----------------
-# 1.1. پیدا کردن لایه Dense(64) در contexmodel
-intermediate_bert_layer = None
-for layer in reversed(contexmodel.layers):
-    if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
-        intermediate_bert_layer = layer.name
-        break
-assert intermediate_bert_layer, "لایه Dense با خروجی 64 در contexmodel پیدا نشد!"
+# # ---------------- 0. آماده‌سازی مدل‌های پیش‌آموزش‌دیده ----------------
+# # (در صورت نیاز لایه‌های آنها را فریز کنید)
+# for layer in contexmodel.layers:
+#     layer.trainable = False
+# for layer in Netmodel.layers:
+#     layer.trainable = False
 
-bert_feature_model = Model(
-    inputs=contexmodel.input,
-    outputs=contexmodel.get_layer(intermediate_bert_layer).output
-)
+# # ---------------- 1. یافتن و ساخت مدل‌های استخراج ویژگی ----------------
+# # 1.1. پیدا کردن لایه Dense(64) در contexmodel
+# intermediate_bert_layer = None
+# for layer in reversed(contexmodel.layers):
+#     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
+#         intermediate_bert_layer = layer.name
+#         break
+# assert intermediate_bert_layer, "لایه Dense با خروجی 64 در contexmodel پیدا نشد!"
 
-# 1.2. پیدا کردن لایه Dense(64) در Netmodel
-intermediate_net_layer = None
-for layer in reversed(Netmodel.layers):
-    if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
-        intermediate_net_layer = layer.name
-        break
-assert intermediate_net_layer, "لایه Dense با خروجی 64 در Netmodel پیدا نشد!"
+# bert_feature_model = Model(
+#     inputs=contexmodel.input,
+#     outputs=contexmodel.get_layer(intermediate_bert_layer).output
+# )
 
-net_feature_model = Model(
-    inputs=Netmodel.input,
-    outputs=Netmodel.get_layer(intermediate_net_layer).output
-)
+# # 1.2. پیدا کردن لایه Dense(64) در Netmodel
+# intermediate_net_layer = None
+# for layer in reversed(Netmodel.layers):
+#     if isinstance(layer, Dense) and layer.output_shape[-1] == 64:
+#         intermediate_net_layer = layer.name
+#         break
+# assert intermediate_net_layer, "لایه Dense با خروجی 64 در Netmodel پیدا نشد!"
 
-# ---------------- 2. تعریف ورودی‌های مدل نهایی ----------------
-# ورودی‌های BERT
-input_ids_in, attention_mask_in = contexmodel.input
-# ورودی Net
-net_input = Netmodel.input
+# net_feature_model = Model(
+#     inputs=Netmodel.input,
+#     outputs=Netmodel.get_layer(intermediate_net_layer).output
+# )
 
-# ---------------- 3. استخراج ویژگی‌ها ----------------
-bert_feat = bert_feature_model([input_ids_in, attention_mask_in])  # (None, 64)
-net_feat  = net_feature_model(net_input)                          # (None, 64)
+# # ---------------- 2. تعریف ورودی‌های مدل نهایی ----------------
+# # ورودی‌های BERT
+# input_ids_in, attention_mask_in = contexmodel.input
+# # ورودی Net
+# net_input = Netmodel.input
 
-# ---------------- 4. Weighted Adaptive Fusion ----------------
-# 4.1. گیت ترکیب
-fusion_concat = Concatenate(name='fusion_concat')([bert_feat, net_feat])  # (None,128)
-gates = Dense(2, activation='softmax', name='fusion_gate')(fusion_concat) 
-# gates[:,0] برای BERT، gates[:,1] برای Net
+# # ---------------- 3. استخراج ویژگی‌ها ----------------
+# bert_feat = bert_feature_model([input_ids_in, attention_mask_in])  # (None, 64)
+# net_feat  = net_feature_model(net_input)                          # (None, 64)
 
-# 4.2. جداسازی و اعمال وزن‌ها
-w_bert = Lambda(lambda x: tf.expand_dims(x[:, 0], -1), name='w_bert')(gates)  # (None,1)
-w_net  = Lambda(lambda x: tf.expand_dims(x[:, 1], -1), name='w_net')(gates)   # (None,1)
+# # ---------------- 4. Weighted Adaptive Fusion ----------------
+# # 4.1. گیت ترکیب
+# fusion_concat = Concatenate(name='fusion_concat')([bert_feat, net_feat])  # (None,128)
+# gates = Dense(2, activation='softmax', name='fusion_gate')(fusion_concat) 
+# # gates[:,0] برای BERT، gates[:,1] برای Net
 
-fused = Add(name='fused_features')([
-    tf.multiply(w_bert, bert_feat),
-    tf.multiply(w_net,  net_feat)
-])  # (None,64)
+# # 4.2. جداسازی و اعمال وزن‌ها
+# w_bert = Lambda(lambda x: tf.expand_dims(x[:, 0], -1), name='w_bert')(gates)  # (None,1)
+# w_net  = Lambda(lambda x: tf.expand_dims(x[:, 1], -1), name='w_net')(gates)   # (None,1)
 
-# ---------------- 5. سر مدل (classification head) ----------------
-x = Dense(64, activation='relu', name='head_dense')(fused)
-x = Dropout(0.3, name='head_dropout')(x)
-output = Dense(2, activation='softmax', name='head_output')(x)
+# fused = Add(name='fused_features')([
+#     tf.multiply(w_bert, bert_feat),
+#     tf.multiply(w_net,  net_feat)
+# ])  # (None,64)
 
-# ---------------- 6. ساخت و کامپایل مدل نهایی ----------------
-final_model = Model(
-    inputs=[input_ids_in, attention_mask_in, net_input],
-    outputs=output,
-    name='WeightedAdaptiveFusionModel'
-)
-final_model.compile(
-    optimizer=Adam(learning_rate=1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-final_model.summary()
+# # ---------------- 5. سر مدل (classification head) ----------------
+# x = Dense(64, activation='relu', name='head_dense')(fused)
+# x = Dropout(0.3, name='head_dropout')(x)
+# output = Dense(2, activation='softmax', name='head_output')(x)
 
-# ---------------- 7. آماده‌سازی داده‌ها ----------------
-# فرض: input_ids, attention_mask، X و labels (one-hot) پیش‌تر بارگذاری شده‌اند.
-Xb = [input_ids, attention_mask]
-Xn = X
-y  = labels
+# # ---------------- 6. ساخت و کامپایل مدل نهایی ----------------
+# final_model = Model(
+#     inputs=[input_ids_in, attention_mask_in, net_input],
+#     outputs=output,
+#     name='WeightedAdaptiveFusionModel'
+# )
+# final_model.compile(
+#     optimizer=Adam(learning_rate=1e-4),
+#     loss='categorical_crossentropy',
+#     metrics=['accuracy']
+# )
+# final_model.summary()
 
-# تقسیم داده‌ها
-split1, split2 = 803, 917
-Xb_train = [arr[:split1] for arr in Xb]
-Xn_train = Xn[:split1]
-y_train  = y[:split1]
+# # ---------------- 7. آماده‌سازی داده‌ها ----------------
+# # فرض: input_ids, attention_mask، X و labels (one-hot) پیش‌تر بارگذاری شده‌اند.
+# Xb = [input_ids, attention_mask]
+# Xn = X
+# y  = labels
 
-Xb_val   = [arr[split1:split2] for arr in Xb]
-Xn_val   = Xn[split1:split2]
-y_val    = y[split1:split2]
+# # تقسیم داده‌ها
+# split1, split2 = 803, 917
+# Xb_train = [arr[:split1] for arr in Xb]
+# Xn_train = Xn[:split1]
+# y_train  = y[:split1]
 
-Xb_test  = [arr[split2:] for arr in Xb]
-Xn_test  = Xn[split2:]
-y_test   = y[split2:]
+# Xb_val   = [arr[split1:split2] for arr in Xb]
+# Xn_val   = Xn[split1:split2]
+# y_val    = y[split1:split2]
 
-# ---------------- 8. آموزش مدل ----------------
-early_stop = EarlyStopping(
-    monitor='val_loss', patience=25, restore_best_weights=True
-)
-checkpoint = ModelCheckpoint(
-    "best_weighted_fusion_model.h5",
-    monitor="val_accuracy", save_best_only=True
-)
+# Xb_test  = [arr[split2:] for arr in Xb]
+# Xn_test  = Xn[split2:]
+# y_test   = y[split2:]
 
-history = final_model.fit(
-    x = Xb_train + [Xn_train],
-    y = y_train,
-    validation_data=(Xb_val + [Xn_val], y_val),
-    batch_size=8,
-    epochs=100,
-    callbacks=[early_stop, checkpoint]
-)
+# # ---------------- 8. آموزش مدل ----------------
+# early_stop = EarlyStopping(
+#     monitor='val_loss', patience=25, restore_best_weights=True
+# )
+# checkpoint = ModelCheckpoint(
+#     "best_weighted_fusion_model.h5",
+#     monitor="val_accuracy", save_best_only=True
+# )
 
-# ---------------- 9. ارزیابی نهایی ----------------
-loss, acc = final_model.evaluate(Xb_test + [Xn_test], y_test, verbose=0)
-print(f"\n✅ Final Weighted Adaptive Fusion Accuracy: {acc:.4f}")
+# history = final_model.fit(
+#     x = Xb_train + [Xn_train],
+#     y = y_train,
+#     validation_data=(Xb_val + [Xn_val], y_val),
+#     batch_size=8,
+#     epochs=100,
+#     callbacks=[early_stop, checkpoint]
+# )
 
-y_true       = np.argmax(y_test, axis=1)
-y_pred_probs = final_model.predict(Xb_test + [Xn_test])
-y_pred       = np.argmax(y_pred_probs, axis=1)
+# # ---------------- 9. ارزیابی نهایی ----------------
+# loss, acc = final_model.evaluate(Xb_test + [Xn_test], y_test, verbose=0)
+# print(f"\n✅ Final Weighted Adaptive Fusion Accuracy: {acc:.4f}")
 
-print("\n📌 Classification Report:")
-print(classification_report(y_true, y_pred, digits=4))
+# y_true       = np.argmax(y_test, axis=1)
+# y_pred_probs = final_model.predict(Xb_test + [Xn_test])
+# y_pred       = np.argmax(y_pred_probs, axis=1)
 
-# ماتریس درهم‌ریختگی
-cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(6,4))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Purples')
-plt.title("Confusion Matrix")
-plt.xlabel("Predicted")
-plt.ylabel("True")
-plt.show()
+# print("\n📌 Classification Report:")
+# print(classification_report(y_true, y_pred, digits=4))
 
-# ROC و PR Curve
-auc_score = roc_auc_score(y_true, y_pred_probs[:,1])
-print(f"🔵 ROC AUC: {auc_score:.4f}")
+# # ماتریس درهم‌ریختگی
+# cm = confusion_matrix(y_true, y_pred)
+# plt.figure(figsize=(6,4))
+# sns.heatmap(cm, annot=True, fmt='d', cmap='Purples')
+# plt.title("Confusion Matrix")
+# plt.xlabel("Predicted")
+# plt.ylabel("True")
+# plt.show()
 
-fpr, tpr, _     = roc_curve(y_true, y_pred_probs[:,1])
-precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:,1])
-roc_auc         = auc(fpr, tpr)
+# # ROC و PR Curve
+# auc_score = roc_auc_score(y_true, y_pred_probs[:,1])
+# print(f"🔵 ROC AUC: {auc_score:.4f}")
 
-plt.figure(figsize=(12,5))
+# fpr, tpr, _     = roc_curve(y_true, y_pred_probs[:,1])
+# precision, recall, _ = precision_recall_curve(y_true, y_pred_probs[:,1])
+# roc_auc         = auc(fpr, tpr)
 
-plt.subplot(1,2,1)
-plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
-plt.plot([0,1],[0,1],'k--')
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.title("ROC Curve")
-plt.legend()
+# plt.figure(figsize=(12,5))
 
-plt.subplot(1,2,2)
-plt.plot(recall, precision, label="Precision-Recall")
-plt.xlabel("Recall")
-plt.ylabel("Precision")
-plt.title("Precision-Recall Curve")
-plt.legend()
+# plt.subplot(1,2,1)
+# plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+# plt.plot([0,1],[0,1],'k--')
+# plt.xlabel("False Positive Rate")
+# plt.ylabel("True Positive Rate")
+# plt.title("ROC Curve")
+# plt.legend()
 
-plt.tight_layout()
-plt.show()
+# plt.subplot(1,2,2)
+# plt.plot(recall, precision, label="Precision-Recall")
+# plt.xlabel("Recall")
+# plt.ylabel("Precision")
+# plt.title("Precision-Recall Curve")
+# plt.legend()
+
+# plt.tight_layout()
+# plt.show()
 
 
 
@@ -1411,10 +1695,10 @@ plt.show()
 #         early_stopping_net
 #     ]
 # )
-np.save("subtreefeature.npy", subtreefeature)
-np.save("data.npy",           data)
-np.save("X.npy",              X)
-np.save("y_test.npy",         y_test)
+# np.save("subtreefeature.npy", subtreefeature)
+# np.save("data.npy",           data)
+# np.save("X.npy",              X)
+# np.save("y_test.npy",         y_test)
 
 #opt=SGD(lr=0.05)
 
