@@ -292,11 +292,11 @@ opt=Adam(lr=0.002)
 #         ModelCheckpoint("MultiView-RumorDetection/best_models7913.hdf5", monitor='val_accuracy', save_best_only=True)
 #     ]
 # )
-early_stopping_net = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
-structuremodel = Sequential()
-structuremodel.add(GRU(6, kernel_initializer='normal', input_shape=(int(countminute), 12), activation='tanh', dropout=0.2))
-structuremodel.add(Dense(2, activation='softmax'))
-structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+# early_stopping_net = EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True)
+# structuremodel = Sequential()
+# structuremodel.add(GRU(6, kernel_initializer='normal', input_shape=(int(countminute), 12), activation='tanh', dropout=0.2))
+# structuremodel.add(Dense(2, activation='softmax'))
+# structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
 # structuremodel.fit(
 #     subtreefeature[0:803], labels[0:803],
@@ -550,22 +550,6 @@ structuremodel.compile(optimizer='adam', loss='binary_crossentropy', metrics=['a
 
 
 
-import numpy as np
-import pandas as pd
-import keras
-from sklearn.preprocessing import LabelEncoder
-from keras.preprocessing.text import Tokenizer
-from keras_preprocessing.sequence import pad_sequences 
-from tensorflow.keras.layers import Input, Dense, Dropout, Conv1D, GlobalMaxPooling1D, LayerNormalization, MultiHeadAttention
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
-from transformers import TFBertModel, BertTokenizer
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 
 
@@ -647,7 +631,10 @@ input_ids_layer = Input(shape=(None,), dtype=tf.int32, name='input_ids')
 attention_mask_layer = Input(shape=(None,), dtype=tf.int32, name='attention_mask')
 # BERT encoding
 bert_out = bert_model(input_ids=input_ids_layer, attention_mask=attention_mask_layer)
-text_feat = Dropout(0.3)(bert_out.pooler_output)
+bert_seq_output = bert_out.last_hidden_state  # shape: (batch_size, seq_len, hidden_size)
+attn_output = tf.keras.layers.Attention()([bert_seq_output, bert_seq_output])  # self-attention
+pooled_output = GlobalAveragePooling1D()(attn_output)
+text_feat = Dropout(0.3)(pooled_output)
 # Sentiment input
 sent_input = Input(shape=(3,), name='sentiment_input')
 # Graph input branch
@@ -689,7 +676,6 @@ history = model.fit(
 # --- EVALUATION ---
 loss, acc = model.evaluate([X_ids_test, X_mask_test, s_test, Xg_test], y_test)
 print(f"Test Accuracy: {acc:.2%} | Loss: {loss:.4f}")
-
 
 
 
